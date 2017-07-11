@@ -11,9 +11,16 @@ logo: false
 paginate: 15
 baseurl: /
 domain_name: 'http://www.wuzhenyu.com.cn'
-google_analytics: 'UA-XXXXXXXX-X'
 gems: [jekyll-paginate]
 
 # Details for the RSS feed generator
 url: 'https://small-cat.github.io'
 author: '吴震宇'
+
+# sidebar settings
+sidebar: true
+sidebar-about-description: "不要被信息的伪高潮所淹没，而自以为是在学习和进步"
+sidebar-avatar:
+
+# SNS settings
+github_username: small-cat
