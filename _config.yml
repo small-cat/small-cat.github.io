@@ -1,16 +1,16 @@
-name: Your New Jekyll Site
-description: Blogging about stuffs
-meta_description: "Your New Jekyll Site, Blogging about stuffs"
+name: 猫步旅人的博客
+description: Coding, Startups and Ideas
+meta_description: "关注技术，钻研技术，崇尚技术"
 
 markdown: kramdown
 highlighter: pygments
 logo: false
 paginate: 15
 baseurl: /
-domain_name: 'http://yourblog-domain.com'
+domain_name: 'http://www.wuzhenyu.com.cn'
 google_analytics: 'UA-XXXXXXXX-X'
 gems: [jekyll-paginate]
 
 # Details for the RSS feed generator
-url:            'blog url'
-author:         'Your Name'
+url:            'http://www.wuzhenyu.com.cn'
+author:         '吴震宇'
