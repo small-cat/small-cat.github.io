@@ -1,6 +1,7 @@
 name: 猫步旅人的博客
 description: Coding, Startups and Ideas
 meta_description: "关注技术，钻研技术，崇尚技术"
+email: hytwzy@163.com
 
 markdown: kramdown
 highlighter: pygments
@@ -12,5 +13,5 @@ google_analytics: 'UA-XXXXXXXX-X'
 gems: [jekyll-paginate]
 
 # Details for the RSS feed generator
-url:            'http://www.wuzhenyu.com.cn'
-author:         '吴震宇'
+url: 'https://small-cat.github.io'
+author: '吴震宇'
