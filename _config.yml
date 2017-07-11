@@ -4,7 +4,9 @@ meta_description: "关注技术，钻研技术，崇尚技术"
 email: hytwzy@163.com
 
 markdown: kramdown
-highlighter: pygments
+#highlighter: pygments
+#github does not support pygments now, change to rouge
+highlighter: rouge
 logo: false
 paginate: 15
 baseurl: /
