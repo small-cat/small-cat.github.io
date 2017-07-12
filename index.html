@@ -50,8 +50,8 @@ about: 'about.html'
 					{{ site.author }}
 				{% endif %}
 			</a>
-            {% if post.categories.size > 0 %} 
-                {{ post.categories | array_to_sentence_string | prepend: 'on ' }} 
+            {% if post.tags.size > 0 %} 
+                {{ post.tags | array_to_sentence_string | prepend: ', ' }} 
             {% endif %}
             <time class="post-date" datetime="{{ post.date | date:"%Y-%m-%d" }}">
                 {{ post.date | date_to_string }}

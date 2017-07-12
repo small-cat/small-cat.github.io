@@ -21,7 +21,7 @@ post_class: post-template
             <section class="post-meta">
                 <time class="post-date" datetime="{{ page.date | date:"%Y-%m-%d" }}">{{ page.date | date_to_string }}</time>
                 {% if page.tags.size > 0 %}
-                    {{ page.tags | array_to_sentence_string | prepend: 'on ' }}
+                    {{ page.tags | array_to_sentence_string | prepend: ', ' }}
                 {% endif %}
             </section>
         </header>
