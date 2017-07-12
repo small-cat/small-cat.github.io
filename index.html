@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Home
-cover: '/images/etna.jpg'
+cover: '/assets/images/etna.jpg'
 about: 'about.html'
 ---
 
@@ -12,7 +12,7 @@ about: 'about.html'
                     <img src="{{ page.logo }}" alt="Blog Logo" />
                 </a>
             {% endif %}
-		{% if page.about %} <a href='{{ site.baseurl }}{{ page.about }}'> πÿ”⁄Œ“ </a> {% endif %}
+		{% if page.about %} <a  class="back-button about-me" href='{{ site.baseurl }}{{ page.about }}'> About me </a> {% endif %}
         <a class="subscribe-button icon-feed" href="{{ site.baseurl }}feed.xml">Subscribe</a>
     </nav>
     <div class="vertical">
@@ -56,6 +56,7 @@ about: 'about.html'
             </time> 
         </footer>
     </article>
+
     {% endfor %}
 
     {% include pagination.html %}
