@@ -81,8 +81,10 @@ scrapy 将会帮助我们将`http://blog.jobbole.com/111469/`这个链接的数�
 但是，如果标题没有获取到，或者选择器返回的结果为空的话，使用 extract()[0] 就会出错，因为试图对一个空链表进行访问，这里使用 extract_first() 方法更加合适，可是使用一个默认值，当返回结果为空的时候，返回这个默认值
 
     extract_first("")   # 默认值为 ""
+
 此处仅仅是将 title 标题作为一个例子进行说明，其他的就不详细进行解释了，主要代码如下所示：
 
+{% highlight ruby %}
         title = response.css(".entry-header h1::text").extract()[0]
         match_date = re.match("([0-9/]*).*",
                               response.css(".entry-meta-hide-on-mobile::text").extract()[0].strip())
@@ -114,6 +116,7 @@ scrapy 将会帮助我们将`http://blog.jobbole.com/111469/`这个链接的数�
         tags = ','.join(tag_lists_css)
 
         content = response.css(".entry *::text").extract()
+{% endhighlight %}
 
 解释一下 create_date，通过获取到的值，存在其他非时间的数据，通过 re.match 使用正则表达式来提去时间。
 
@@ -146,6 +149,7 @@ scrapy 会为我们创建一个名为 ArticleSpider 的项目 <br>
 
 下面，我们首先需要做的，就是利用我们编写的 css 表达式，获取我们提取的文章的值。在 jobbole.py 中，我们看到
 
+{% highlight ruby %}
     class JobboleSpider(scrapy.Spider):
         name = 'jobbole'
         allowed_domains = ['blog.jobbole.com']
@@ -153,6 +157,7 @@ scrapy 会为我们创建一个名为 ArticleSpider 的项目 <br>
     
         def parse(self, response):
         pass
+{% endhighlight %}
 
 scrapy 为我们创建了一个 JobboleSpider 的类，name 是爬虫项目的名称，同时定义了域名以及爬取的入口链接。scrapy 初始化的时候，会初始化 `start_urls` 入口链接列表，然后通过 `start_requests` 返回 Request 对象进行下载，调用 parse 回调函数对页面进行解析，提取需要的值，返回 item。
 
@@ -189,6 +194,7 @@ scrapy 为我们创建了一个 JobboleSpider 的类，name 是爬虫项目的�
 ![get next url](http://oszgzpzz4.bkt.clouddn.com/image/scrapy_starter_catch_jobbole/get_next_url.png)<br>
 既然现在所有的 url 都能够获取到了，那么现在我们将 jobbole.py 中的 parse 函数修改一下
 
+{% highlight ruby %}
     def parse(self, response):
         post_nodes = response.css("#archive .floated-thumb .post-thumb")    # a selector, 可以在这个基础上继续做 selector
         
@@ -236,7 +242,8 @@ scrapy 为我们创建了一个 JobboleSpider 的类，name 是爬虫项目的�
 
         # cpyrights = response.css(".copyright-area").extract()
         content = response.css(".entry *::text").extract()
-
+{% endhighlight %}
+		
 1. 获取文章列表页中的文章url，交给 scrapy 下载后并进行解析，即调用 parse 函数解析
 2. 然后获取下一页的文章 url，按照1 2 循环
 
@@ -251,6 +258,7 @@ c. 生成需要进一步处理 URL 的 Request 对象 <br>
 ## 扩展二：使用item，并保存图片到本地
 上一小节提到了， parse 函数提取数据之后，生成 item，scrapy 会通过 http 将 item 传到 pipeline 进行处理，那么这一小节，我们使用 item 来接收 parse 提取的数据。在 items.py 文件中，定义一个我们自己的数据类 JobBoleArticleItem，并继承 scrapy.item 类
 
+{% highlight ruby %}
     class JobBoleArticleItem(scrapy.Item):
         title = scrapy.Field()          # Field()能够接收和传递任何类型的值,类似于字典的形式
         create_date = scrapy.Field()    # 创建时间
@@ -262,11 +270,13 @@ c. 生成需要进一步处理 URL 的 Request 对象 <br>
         tags = scrapy.Field()           # 标签分类 label
         content = scrapy.Field()        # 文章内容
         object_id = scrapy.Field()      # 文章内容的md5的哈希值，能够将长度不定的 url 转换成定长的序列
+{% endhighlight %}
 
 Field() 对象，能够接收和传递任何类型的值，看源代码，就能发现，Field() 类继承自 dict 对象，具有字典的所有属性。
 
 注意，在上面定义的类中，我们增加了一个新的成员变量 `front_img_url_download`，这是保存的是文章列表中，每一个文章的图片链接。我们需要将这个图片下载到本地环境中。既然使用了 item 接收我们提取的数据，那么 parse 函数就需要做相应的改动
 
+{% highlight ruby %}
     def parse(self, response):
         post_nodes = response.css("#archive .floated-thumb .post-thumb")    # a selector, 可以在这个基础上继续做 selector
         
@@ -280,8 +290,11 @@ Field() 对象，能够接收和传递任何类型的值，看源代码，就能
         next_url = response.css("span.page-numbers.current+a::attr(href)").extract_first("")
          if next_url:
              yield Request(url=parse.urljoin(response.url, next_url), callback=self.parse)
+{% endhighlight %}
+
 同时，解析函数 parse_detail 也需要修改，将数据保存到我们的item中，只需要添加下面的部分就可
 
+{% highlight ruby %}
         front_img_url = response.meta.get("front-img-url", "")
         article_item = JobBoleArticleItem() # 实例化 item 对象
         # 赋值 item 对象
@@ -297,6 +310,7 @@ Field() 对象，能够接收和传递任何类型的值，看源代码，就能
         article_item["content"] = ''.join(content)      # 取出的 content 是一个 list ,存入数据库的时候，需要转换成字符串
         article_item["object_id"] = gen_md5(response.url)
         yield article_item
+{% endhighlight %}
 
 这里，parse 函数成功生成了我们定义的 item 对象，将数据传递到 pipeline。那么，图片链接已经获取到了，我们如下将图片下载下来呢。
 
@@ -328,6 +342,7 @@ scrapy 提供了一个 ImagesPipeline 类，可直接用于图片操作，只需
 
 首先，在 items.py 中，我们需要定义一个继承自 ItemLoader 的类
 
+{% highlight ruby %}
     class ArticleItemLoader(ItemLoader):
         """
         自定义 ItemLoader, 就相当于一个容器
@@ -335,9 +350,11 @@ scrapy 提供了一个 ImagesPipeline 类，可直接用于图片操作，只需
         # 这里表示，输出获取的 ArticleItemLoader 提取到的值，都是 list 中的第一个值
         # 如果有的默认不是取第一个值，就在 Field() 中进行修改
         default_output_processor = TakeFirst()
+{% endhighlight %}
 
 将默认输出函数定为 TakeFirst()，即去结果 list 中的第一个值，定义了 ItemLoader 类之后，需要修改 jobbole.py 中的 `parse_detail` 函数了，现在就不再直接使用 css selector 了，使用 itemloader 中的 css 进行数据提取，新的 `parse_detail` 如下所示：
 
+{% highlight ruby %}
     def parse_detail(self, response):
         front_img_url = response.meta.get("front-image-url", "")
         item_loader = ArticleItemLoader(item=JobBoleArticleItem(), response=response)
@@ -356,6 +373,7 @@ scrapy 提供了一个 ImagesPipeline 类，可直接用于图片操作，只需
         # item_loader.add_value()
         article_item_loader = item_loader.load_item()
         yield article_item_loader
+{% endhighlight %}
 
 这样，数据提取就全部交给了 itemloader 来执行了。代码整体都简洁和工整了很多。ItemLoader 有三个方法用于提取数据，分别是 `add_css()`, `add_xpath()`, `add_value()`，前两个分别是 css 选择器和 xpath 选择器，如果是值，就直接使用 `add_value()` 即可。
 
@@ -363,6 +381,7 @@ scrapy 提供了一个 ImagesPipeline 类，可直接用于图片操作，只需
 
 但是，大家应该已经发现，之前我们只接使用 css selector 提取数据的时候，对于某些数据，需要使用正则表达式进行匹配才能获取所需的值，这里什么都没做，仅仅是通过 itemloader 提取了数据而已。所以，我们还需要重新定义我们的 item 类，这些操作在 item 中进行处理。修改 items.py 中的 JobBoleArticleItem 类，具体如下：
 
+{% highlight ruby %}
     class JobBoleArticleItem(scrapy.item):
         title = scrapy.Field()
         create_date = scrapy.Field(     # 创建时间
@@ -395,6 +414,7 @@ scrapy 提供了一个 ImagesPipeline 类，可直接用于图片操作，只需
             output_processor=Join("")
         )
         object_id = scrapy.Field()      # 文章内容的md5的哈希值，能够将长度不定的 url 转换成定长的序列
+{% endhighlight %}
 
 `input_processor` 对传入的值进行预处理， `output_processor` 对处理后的值按照规则进行处理和提取，比如 `TakeFirst()` 就是对处理的结果去第一个值。
 
@@ -402,6 +422,7 @@ scrapy 提供了一个 ImagesPipeline 类，可直接用于图片操作，只需
 
 因为上面定义 ArticleItemLoader 类的时候，使用了默认的 `default_output_processor`，如果不想使用默认的这个方法，就在 Field() 中，使用 `output_processor` 参数覆盖默认的方法，哪怕什么都不做，也不会使用默认方法获取数据了。对上面那些方法定义如下：
 
+{% highlight ruby %}
     def get_nums(value):
         """
         通过正则表达式获取 评论数，点赞数和收藏数
@@ -438,6 +459,7 @@ scrapy 提供了一个 ImagesPipeline 类，可直接用于图片操作，只需
         do nothing, 只是为了覆盖 ItemLoader 中的 default_processor
         """
         return value
+{% endhighlight %}
 
 **千万注意：**这些方法，每一个最后，都必须有 return，否则程序到后面将获取不到这个字段的数据，再次访问这个字段的时候，就会报错。
 ## 扩展四：将数据导出到 json 文件中
@@ -447,6 +469,7 @@ scrapy 提供了一个 ImagesPipeline 类，可直接用于图片操作，只需
 ### json 库
 我们已经知道，对数据的处理，scrapy 是在 pipeline 中进行的，所以，我们需要在 pipelines.py 中定义我们对数据的导出操作。创建一个新类
 
+{% highlight ruby %}
     class JsonWithEncodingPipeline(object):
         """
         处理 item 数据，保存为json格式的文件中
@@ -465,9 +488,12 @@ scrapy 提供了一个 ImagesPipeline 类，可直接用于图片操作，只需
             把文件关闭
             """
             self.file.close()
+{% endhighlight %}
+
 `__init__()` 构造对象的时候，就打开文件，scrapy 会调用 `process_item()` 函数对数据进行处理，在这个函数中，将数据以 json 的格式写入文件中。操作完成之后，将文件关闭。思路很简单。
 
 ### scrapy.exporters 的方式
+{% highlight ruby %}
     class JsonExporterPipeline(object):
 
         def __init__(self):
@@ -486,6 +512,8 @@ scrapy 提供了一个 ImagesPipeline 类，可直接用于图片操作，只需
         def process_item(self, item, spider):
             self.exporter.export_item(item)
             return item
+{% endhighlight %}
+
 scrapy.exporters 提供了几种不同格式的文件支持，能够将数据输出到这些不同格式的文件中，查看 JsonItemExporter 源码即可获知
 
     __all__ = ['BaseItemExporter', 'PprintItemExporter', 'PickleItemExporter',
@@ -513,6 +541,7 @@ scrapy.exporters 提供了几种不同格式的文件支持，能够将数据输
 好了，数据库表创建成功之后，下面就来将数据入库了。
 
 ### MySQLdb 的方法入库
+{% highlight ruby %}
     class MysqlPipeline(object):
         def __init__(self):
             # 连接数据库
@@ -533,6 +562,7 @@ scrapy.exporters 提供了几种不同格式的文件支持，能够将数据输
         def spider_close(self, spider):
             self.cursor.close()
             self.conn.close()
+{% endhighlight %}
 
 如果对 API 想了解的更多，就去阅读 python MySQLdb 的相关API文档说明，当然，要想这个生效，首先得在 settings.py 文件中将这个 pipeline 类加入 ITEM_PIPELINE 字典中
 
@@ -545,6 +575,7 @@ scrapy.exporters 提供了几种不同格式的文件支持，能够将数据输
     }
 
 ### 通过 Twisted 框架提供的异步方法入库
+{% highlight ruby %}
     class MysqlTwistedPipeline(object):
         """
         利用 Twisted API 实现异步入库 MySQL 的功能
@@ -604,6 +635,7 @@ scrapy.exporters 提供了几种不同格式的文件支持，能够将数据输
             #                                 item["fav_nums"], item["vote_nums"], item["tags"], item["content"]))
             print(insert_sql)
             cursor.execute(insert_sql)
+{% endhighlight %}
     
 博主也是近一个多星期开始学习爬虫的 scrapy 框架，对 Twisted 框架也不怎么熟悉，上面的代码是一个例子，大家可以看下注释，等以后了解更多会补充更多相关知识。
 

@@ -1,10 +1,10 @@
 ---
 layout: post
-title:  "搭建局域网范围内的git服务器!"
+title:  "搭建本地git服务器!"
 date:   2016-12-22 10:18:00
-tags: git 服务器搭建
+tags: git 搭建
 ---
-本文介绍了如何在局域网范围内搭建 git 服务器
+讲述在局域网范围内搭建 git 服务器的方法
 
 搭建局域网范围内的 git 服务器，LZ模拟实验，使用了三个虚拟机，一个 RHEL6，两个 Ubuntu server
 
@@ -66,6 +66,5 @@ clone fetch pull push
 
 具体 git 的使用方法可以参考如下文章，也可以查看 `gittutorials`
 
-参考文章： <br>
-1. [从0开始学习 GitHub](http://blog.csdn.net/column/details/13170.html__) <br>
-2. [Git详解，服务器上的Git](http://blog.csdn.net/hustpzb/article/details/7287954)
+从0开始学习 GitHub：__http://blog.csdn.net/column/details/13170.html__ <br>
+Git详解，服务器上的Git：__http://blog.csdn.net/hustpzb/article/details/7287954__
