@@ -8,7 +8,9 @@ redis replication
 
 在 redis 中，用户可以通过执行 SLAVEOF 或者通过设置 slaveof 选项，让一个服务器去复制另一个服务器，我们称呼这为主备复制。
 
-> 查看__[redis主从复制]__：http://blog.csdn.net/honglicu123/article/details/53693395
+> 查看__[redis主从复制]__：http://blog.wuzhenyu.com.cn/2016/12/15/how-to-build-redis-replication.html <br>
+也可以查看我在CSDN 上发的博客: http://blog.csdn.net/honglicu123/article/details/53693395
+
 
 redis2.8 以上版本的同步，有两种方式的同步，一种为完整重同步(full resychronization)，另一种是部分重同步(partial resychronization)。`PSYNC`具有这两种同步模式。
 
