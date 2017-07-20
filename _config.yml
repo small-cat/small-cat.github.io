@@ -8,13 +8,13 @@ markdown: kramdown
 #github does not support pygments now, change to rouge
 highlighter: rouge
 logo: false
-paginate: 15
+paginate: 10
 baseurl: /
 #domain_name: 'wuzhenyu.com.cn'
 gems: [jekyll-paginate]
 
 # Details for the RSS feed generator
-url: 'https://small-cat.github.io'
+url: 'http://blog.wuzhenyu.com.cn
 author: '吴震宇'
 
 # sidebar settings
