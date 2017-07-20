@@ -14,7 +14,7 @@ baseurl: /
 gems: [jekyll-paginate]
 
 # Details for the RSS feed generator
-url: 'http://blog.wuzhenyu.com.cn
+url: 'http://blog.wuzhenyu.com.cn'
 author: '吴震宇'
 
 # sidebar settings
