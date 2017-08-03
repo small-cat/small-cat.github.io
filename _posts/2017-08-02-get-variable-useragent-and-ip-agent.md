@@ -30,7 +30,7 @@ tags: user-agent 反爬虫 代理
 在 scrapy 爬虫的时候，比如爬取知乎的文章，知乎有一定的反爬虫限制，会检测你的 useragent，如果访问量很大，就会暂时停止你访问服务器，那么我们就需要不断获取变化的 useragent 来避免被知乎禁止访问服务器。
 
 大家在 scrapy 官方帮助文档的时候，应该可以看到 scrapy 的系统设计图 <br>
-![scrapy architecture](file:///home/wuzhenyu/document/Note_scrapy/images/scrapy_architecture.png)
+![scrapy architecture](http://oszgzpzz4.bkt.clouddn.com/image/useragent_ipagent/scrapy_architecture.png)
 
 当我们通过 spider yield 一个 requests 的时候，首先通过 spider middlewares 到达 scrapy engine，然后 engine 将 requests 放到 scheduler 的队列中，通过 scheduler 调度队列中的 requests ，scheduler 选中一个 requests 后，将 requests 通过 engine 传递给 downloader，在这之前，必然会经过 downloader middlewares，downloader 下载好之后，将 response 返回给 engine，engine 在将 response 返回给 spider，我们就可以在 spider 中调用 callback 进行解析，简单的流程大概就是这样。
 
