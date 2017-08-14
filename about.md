@@ -4,7 +4,7 @@ title: 个人简历
 ---
 
 # <center>吴震宇</center>
-<font face="consolas">邮箱：hytwzy@163.com 　　　联系电话：13530210085 <br>
+<font face="consolas">邮箱：mblrwuzy@gmail.com 　　　联系电话：13530210085 <br>
 个人网站：blog.csdn.net/honglicu123 和 blog.wuzhenyu.com.cn</font>
 
 ## 教育背景
