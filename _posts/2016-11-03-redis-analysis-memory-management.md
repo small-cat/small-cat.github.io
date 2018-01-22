@@ -220,6 +220,7 @@ zmalloc函数最后
 	
 	    return um;
 	}
+
 ## Redis中的内存分配大小和碎片大小
 ### RSS (resident set size)
 {% highlight ruby %}
