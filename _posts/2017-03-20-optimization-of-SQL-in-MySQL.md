@@ -12,33 +12,52 @@ MySQL中对SQL的调优方法
 查看慢查询的时间
 
 	show variables like 'long_query_time';
-	
+
 临时设置慢查询的值
 
 	set long_query_time=2
-	
+
 但是，如果需要永久设置，就需要在MySQL的配置文件中进行配置。
 
 在 mysql 的配置文件中，添加
 
 	long_query_time=2(记录sql执行超过的时间，默认为10s)
 	log-slow-queries=/var/log/mysql/slowquery.log(如果为空，系统会指定一个缺省的文件 hostname_slow.log)
-	
+
 这样就打开了慢查询日志，mysql会将执行时间超过 2 秒的语句视作慢查询，并记录在慢查询日志中。查看日志使用工具 `mysqldumpslow`，使用 -h 选项可查看帮助信息
 
 查看访问次数最多的20个sql
 
 	mysqldumpslow -s c -t 20 slowquery.log
-	
+
 查看返回记录集最多的20个sql
 
 	mysqldumpslow -s r -t 20 slowquery.log
-	
+
 按照时间返回前10条sql里含有 `left join`的语句
 
 	mysqldumpslow -t 10 -s t -g “left join” slowquery.log
+当然，如果查询慢查询日志报告，我们可以借用一些其他的工具，比如 `pt-query-digest`，这是 percona toolkit 的包，在Ubuntu下可以直接安装。
 
-## 使用 explain
+```shell
+sudo apt-get install percona-toolkit
+```
+
+然后使用这个工具来查看慢查询日志，能够生成更加详细的报告。
+
+## show status
+
+MySQL中直接使用如下几个命令查看当前status
+
+```shell
+show status;
+show full processlist;
+```
+
+
+
+## 使用 EXPLAIN
+
 上述方法，通过慢查询日志，找到慢查询的语句之后，使用 explain 分析语句的执行过程。
 
 explain 的使用方法很简单，就是 `explain select ... from ... [where ...]` 的方式。 输出结果为
@@ -113,8 +132,27 @@ explain 的使用方法很简单，就是 `explain select ... from ... [where ..
 query_id 是执行的 sql 语句的编号，通过该 id 可以查看某一条 sql 的具体时间信息
 
 	show profile for query [query_id];
+通过上面这条命令，查看该sql耗时的具体阶段是在什么时候，上面的命令是按照执行顺序排序的，要查看时间，一般关注exectuing和sending data。然后对这些特定的阶段进行针对性的优化。如果上面这个命令不好对时间排序，可以直接查询数据库的表的方式进行查看。
+
+```sql
+set @query_id = 1;
+select STATE, SUM(DURATION) as Total_R,
+ROUND(
+    100 * SUM(DURATION) /
+    (select SUM(DURATION)
+     from information_schema.profiling
+     where query_id = @query_id
+     ), 2) as Pct_R,
+     COUNT(*) as Calls, 
+     SUM(DURATION) / COUNT(*) as "R/Call"
+from information_schema.profiling
+where query_id = @query_id
+group by STATE
+order by Total_R desc;
+```
 
 ## 确定问题并采取的相应的优化措施
+
 常用的优化措施就是添加索引。添加索引能够提升查询效率，但是却降低了插入、更新、删除的性能。
 
 MySQL中添加索引的方法如下：
