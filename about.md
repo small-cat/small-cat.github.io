@@ -43,6 +43,6 @@ title: 个人简历
 ## 个人评价
 　　本人热衷于新技术的学习，有 3 年 linux 开发经验，一直坚持学习开源项目和技术，开设博客（blog.csdn.net/honglicu123），记录和分享自己的学习心得和实践经验。<br>
 　　作为一名热爱编程的程序员，本人尤为钟情于 Linux 平台，并对互联网很感兴趣，喜爱 c 语言，也经常被 c 语言的华贵多彩所吸引。 <br>
-　　每当我们对未来充满了各种美好的期望与幻想时，就该反思一下自己现在的努力是否配的商这环境中的将来。
-　　人最大的悲剧就是眼睁睁地让梦想一点点变成空想。还好，虽然工作三年，但时刻都没有忘记自己的梦想。不求无憾，但求无悔。
-　　The moment we are old enough to take the wheels, responsiblity lies with you.
+　　每当我们对未来充满了各种美好的期望与幻想时，就该反思一下自己现在的努力是否配的商这环境中的将来。<br>
+　　人最大的悲剧就是眼睁睁地让梦想一点点变成空想。还好，虽然工作三年，但时刻都没有忘记自己的梦想。不求无憾，但求无悔。 <br>
+　　The moment we are old enough to take the wheels, responsiblity lies with you. <br>
