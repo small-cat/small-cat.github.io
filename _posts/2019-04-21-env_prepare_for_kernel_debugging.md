@@ -29,11 +29,11 @@ how to build environment for debugging linux kernel with gdb and kgdb
 
 set serial port on virtualbox. settings->serial ports, on the target virtual machine:
 
-![serial port settings for target](/_pics//serial_ports_settings.png)
+![serial port settings for target](https://github.com/small-cat/small-cat.github.io/blob/master/_pics/serial_ports_settings.png)
 
 on the host virtual machine:
 
-![serial port setting for host](/_pics/serial_port_setting_for_host.png)
+![serial port setting for host](https://github.com/small-cat/small-cat.github.io/blob/master/_pics/serial_port_setting_for_host.png)
 
 NOTE: you should start the target machine first, and then to start host machine, or you will occur an error that can not connect to serial port because we have selected "Connected to existing pipe/socket", the "/tmp/serial" will be created on the target machine. 
 
