@@ -234,7 +234,7 @@ redis计算哈希值和索引值，是根据键值来计算的，先计算出哈
 
 ## 解决键冲突
 当不同的 key 利用哈希算法得到相同的 hash 值时，哈希表时如何解决冲突问题的呢？通过前面的哈希节点的结构可以看到`dictEntry`结构是一个链表的节点，有一个指向 `dictEntry`节点的指针成员，确实，哈希表就是通过拉链法（或者链地址法）来解决冲突问题的，每一个哈希节点都有一个next指针，相同哈希索引的多个节点可以通过next指针相连构成一个单链表，这就解决了冲突问题。<br>
-![sss](./哈希链表.png)
+![hash list](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/hash_list.png)
 
 因为dictEntry 组成的单链表是没有尾节点的，每次插入一个节点都是从头部插入。
 

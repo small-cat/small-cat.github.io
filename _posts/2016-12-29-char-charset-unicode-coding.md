@@ -67,7 +67,7 @@ UTF-8的编码规则很简单，只有二条：
 
 下面以汉字 "中" 为例，讲解 UTF-8 编码的转换： <br>
 “中”的 Unicode 编码为 U+4E2D，在上面给出的 Unicode 范围中查询，发现 UTF-8 编码需要 3B 存储 <br>
-![中转换成UTF-8编码](http://oszgzpzz4.bkt.clouddn.com/image/encoding/%E4%B8%ADUTF-8%E8%BD%AC%E6%8D%A2.png)
+![中转换成UTF-8编码](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/uft-8_code_translation.png)
 
 到目前为止，一共介绍了三种 Unicode 编码方法。比较传统的是用2B存储每一个编码，也叫 UCS-2 (2代表2个字节)，或者 UTF-16，但是还是需要区分高位补零还是地位补零，还有一种是计较受欢迎的的 UTF-8 标准。
 

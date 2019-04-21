@@ -38,7 +38,7 @@ _`type`_： 表示对象的类型，对应的是 redis 中的 `TYPE` 命令，�
 
 ## 对象的类型 (TYPE)
 对象的 `TYPE` 属性记录了对象的类型。在 redis 客户端中，当使用 `TYPE` 命令查看某个键的类型时，服务器会根据对象的类型返回相应的值。 <br>
-![type command](http://oszgzpzz4.bkt.clouddn.com/image/redis_analysis/redis_TYPE.png) <br>
+![type command](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/redis_TYPE.png) <br>
 那代码中， `TYPE` 命令有几个值呢
 
 	/* Object types */
@@ -128,7 +128,7 @@ redis 中根据不同数据类型创建不同的对象，设置对象的类型�
 	}
 
 其结构如下所示: <br>
-![sds object](http://oszgzpzz4.bkt.clouddn.com/image/redis_analysis/sds-object.png)
+![sds object](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/sds-object.png)
 当对象保存的值是整数时，将字符串的编码设置为`REDIS_ENCODING_INT`，同时将整数值保存在字符串对象结构的 ptr 里面
 
 {% highlight ruby %}
@@ -193,7 +193,7 @@ embstr 编码通过一次内存分配申请一块连续的内存空间，包括 
 	o->ptr = sh+1;
 	
 其结构如下所示 <br>
-![embstr object](http://oszgzpzz4.bkt.clouddn.com/image/redis_analysis/embstr-object.png)
+![embstr object](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/embstr-object.png)
 
 使用 embstr 编码保存字符串的优点：<br>
 

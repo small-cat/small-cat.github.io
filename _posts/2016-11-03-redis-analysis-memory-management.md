@@ -389,10 +389,10 @@ redis 通过公式 `RSS / allocated-bytes` 来计算内存使用率，通过上�
 在 linux 系统，有几种可以查看 RSS 的方法：
 
 * 查看 `/proc/pid/stat` 文件，获取第24个数，即为程序的RSS的值，单位是内存页(4k) <br>
-![cat /proc/pid/stat](http://oszgzpzz4.bkt.clouddn.com/image/redis_analysis/proc_pid_stat.png)
+![cat /proc/pid/stat](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/proc_pid_stat.png)
 
 * 查看 `/proc/pid/status` 文件 <br>
-![cat /proc/pid/status](http://oszgzpzz4.bkt.clouddn.com/image/redis_analysis/proc_pid_status.png) <br>
+![cat /proc/pid/status](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/proc_pid_status.png) <br>
 方法一中的图片上，可以看出第24个数为552，转换成kB大小为 552*4 = 2208kB，大小刚好等于上图中的`VmRSS`
 
 **在 redis 的客户端程序中，执行 `info` 指令，即可查询到内存信息的使用情况等信息。**

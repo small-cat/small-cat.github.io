@@ -10,7 +10,7 @@ tags: redis code cs server socket
 redis客户端向服务器发送命令请求，服务器接收到客户端发送的命令请求之后，读取解析命令，并执行命令，同时将命令执行结果返回给客户端。
 
 客户端与服务器交互的代码流程如下图所示： <br>
-![代码流程](http://oszgzpzz4.bkt.clouddn.com/image/redis_analysis/redis_clientServer_flow.png)
+![代码流程](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/redis_clientServer_flow.png)
 
 Redis 服务器负责与多个客户端建立网络连接，处理客户端发送的命令请求，在数据库中保存客户端执行的命令产生的数据，并通过资源管理器来维护服务器自身的运转。
 
@@ -231,7 +231,7 @@ mask 为事件的类型，为 `AE_WRITABLE` 和 `AE_READABLE` 两种，分别为
 
 ### 事件处理函数
 现在再来回顾一下，redis文件事件处理器的构成，套接字、IO多路复用程序、事件分派器和事件处理函数。如下图所示： <br>
-![components of file events](http://oszgzpzz4.bkt.clouddn.com/image/redis_analysis/file_events_components.png)
+![components of file events](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/file_events_components.png)
 
 redis 服务器中，事件处理函数，主要由上图中列出的三种，连接应答处理器(acceptTcpHandler)、命令请求处理器(readQueryFromClient)和命令回复处理器(sendReplyToClient)。这里所说的都是文件事件处理函数。
 
@@ -1295,7 +1295,7 @@ __在 redis 中，需要查看系统是否支持 THP__，即 `Transparent Huge P
 一个命令从客户端发送到服务器，再由服务器接收执行和回复的经过，需要客户端和服务器完成一系列的操作。
 
 ### 命令请求的执行过程
-![send and reply](http://oszgzpzz4.bkt.clouddn.com/image/redis_analysis/send_and_reply.png) <br>
+![send and reply](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/send_and_reply.png) <br>
 加入客户端发送 `SET KEY REDIS` 命令给服务器到获得回复 OK 期间，需要共同完成以下操作： <br>
 1) 客户端向服务器发送命令请求 <br>
 2) 服务器接收到客户端发送的命令请求，执行操作，并在数据库中设置，操作成功后产生命令回复OK <br>
@@ -1330,7 +1330,7 @@ __在 redis 中，需要查看系统是否支持 THP__，即 `Transparent Huge P
 
 2) 对输入缓冲区中的命令进行解析，将参数和参数个数保存在客户端状态的 argc 和 argv 中，`networking.c/processInlineBuffer` 和 `networking.c/processMultibulkBuffer` 就是完成这个操作。将redis协议格式的命令请求解析之后，每一个命令参数都生成一个 redisStringObject 类型的结构，保存在 argv 数组中。比如 `SET NAME REDIS` ，在客户端状态结构中将如下所示的形式存储
 
-![redis client get command](http://oszgzpzz4.bkt.clouddn.com/image/redis_analysis/redisClient_getCommand.png) <br>
+![redis client get command](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/redisClient_getCommand.png) <br>
 3) 调用命令执行函数，执行命令。
 
 **问题：命令时如何执行的呢**
