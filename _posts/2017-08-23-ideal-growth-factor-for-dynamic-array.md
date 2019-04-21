@@ -66,7 +66,7 @@ c++ 标准库函数默认情况下提供了合理的性能，但是，如何做�
 上述策略分析得知，为 vector 再分配内存，扩大容量时，每次申请仅仅是扩大一个固定的大小，时间复杂度达到二次方。相反，额外申请的容量必须随着 vector 容量的增长而增长。那么，如果我们每次为 vector 重新申请内存时，额外申请的空间是之前的 2 倍大小的话，可以显著的降低时间复杂度，为 O(n)。
 
 当我们为 vector 重新申请内存并向 vector 添加元素时，我们将 vector 想成一下这种结构： <br>
-![vector](http://oszgzpzz4.bkt.clouddn.com/growth_rate/fig2.gif)
+![vector](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/fig2.gif)
 
 最后一次重新分配内存之后，有一半的空间可以添加新元素，所以这部分元素不需要拷贝，但是原先的那 `n/2` 个元素需要进行拷贝到新申请的内存中；同理，上一次重分配时，有 `n/4` 的元素需要拷贝，以此一次类推，获得如下公式 
 
@@ -100,7 +100,7 @@ C++ 标准并没有强制要求 vector 类必须按照特定的方式管理内�
 
 # What is the ideal growth rate for a dynamically allocated array
 动态数组的增长因素依赖很多元素，包括时间与空间的权衡以及用于内存分配的算法。关于最佳增长因子，展开过很多次讨论，包括推荐使用黄金比例来进行。(The Golden Ratio - Phi, 1.618)。以下是一些比较流行的语言中的增长因子[^2]： <br>
-![growth factors](http://oszgzpzz4.bkt.clouddn.com/growth_rate/growth_factors.png)
+![growth factors](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/growth_factors.png)
 
 在有些讨论中[^3]，**认为增长因子 1.5 要优于 2**，首先我们分析一下增长因子为 2 的情况：
 

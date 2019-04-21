@@ -8,12 +8,12 @@ tags: 模拟登录 session scrapy
 
 # session 模拟登陆
 大家知道，登陆知乎需要验证码，那么如何通过 session 来模拟登陆知乎呢。首先通过分析知乎登陆请求， 如下图所示 <br>
-![zhihu login](http://oszgzpzz4.bkt.clouddn.com/image/login_with_session_and_scrapy/zhihu_login_analysis.png)
+![zhihu login](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/login_with_session_and_scrapy/zhihu_login_analysis.png)
 
 上图中标注的部分就是我们需要模拟的请求，也就是说，我们使用 session 登陆的时候，首先需要构造我们的请求头部 header。
 
 在上图中，有一个 `x-xsrftoken` 字段，这个字段是知乎登陆请求中必须有的字段，那么这个字段是如何获取的呢，在我们打开知乎登陆页面的时候，查看网页源代码，在这个里面，我们就能获取到这个信息，如下图所示 <br>
-![xsrf token](http://oszgzpzz4.bkt.clouddn.com/image/login_with_session_and_scrapy/xsrf_token.png)
+![xsrf token](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/login_with_session_and_scrapy/xsrf_token.png)
 
 这是一个隐藏的标签，在页面上是不会显示的。(这种手法，有点类似于，当关闭浏览器 cookie 功能的时候，服务器传递 `session_id`，也可以采用这种做法，发送一个隐藏的标签，保存 `session_id`)，那么，获取这个 `xsrf token` 就变得非常简单了，首先获取登录页面，然后通过正则表达式获取这个值，代码如下所示：
 
@@ -68,20 +68,20 @@ tags: 模拟登录 session scrapy
 		response_text = session.post(post_url, data=post_data, headers = header)
 
 这段代码运行的时候，登录失败，错误提示是验证码错误，`F12` 浏览器分析，查看登录的参数，如下 <br>
-![zhihu login params](http://oszgzpzz4.bkt.clouddn.com/image/login_with_session_and_scrapy/login_params.png)
+![zhihu login params](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/login_with_session_and_scrapy/login_params.png)
 
 参数包含四个值，分别是 `_xsrf`, `password`, `phone_num`, `captcha_type`，我们在上面的代码中构建的 `post_data` 缺少验证码参数，所以模拟登录失败。
 
 > **知乎登录的时候，如果登录成功，再次登录的时候，可能不需要输入验证码，这是因为在浏览器的 cookies 中保存了相关的数据，F12进入调试模式，将 storage 中的 cookie 删除，再登录，就需要输入验证码了**
 
 同时，还需要注意的一点就是，`captcha_type` 这个参数是 `cn`，验证码是中文，让你点击倒立的汉字，点击正确才能通过验证码验证，如下所示 <br>
-![captcha cn](http://oszgzpzz4.bkt.clouddn.com/image/login_with_session_and_scrapy/captcha_cn.png)
+![captcha cn](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/login_with_session_and_scrapy/captcha_cn.png)
 
 我们获取验证码的方式比较直接，就是通过将验证码图片下载下来，打开之后，输入验证码，构造 `post_data` 然后发送请求，这样来模拟登录。但是如果使用中文这种点击的方式，就无法采用这种方法了，通过观察参数我们发现，`captcha_type`这个参数为 `cn` 的时候返回的验证码是中文，如果我们将这个值改成 `en` 是不是就是字母了呢，修改后发送请求如下所示(浏览器的调试功能里面，有一个 edit and send 的功能) <br>
-![captcha en](http://oszgzpzz4.bkt.clouddn.com/image/login_with_session_and_scrapy/captcha_en.png)
+![captcha en](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/login_with_session_and_scrapy/captcha_en.png)
 
 获取的验证码就是数字加字母了，这样，我们就能通过先获取验证码，再输入的方式模拟登录了，好了，说了这么多，那么如何获取验证码图片呢？我们在回头来看下验证码的请求 <br>
-![get captcha](http://oszgzpzz4.bkt.clouddn.com/image/login_with_session_and_scrapy/get_captcha.png)
+![get captcha](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/login_with_session_and_scrapy/get_captcha.png)
 
 验证码的请求为`https://www.zhihu.com/captcha.gif?r=1501223240460&type=login&lang=en`，中间 `r=1501223240460` 这个参数是一个随时间变动的参数，可以通过时间 `time.time()` 获取，代码如下
 
