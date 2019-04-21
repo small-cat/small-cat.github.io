@@ -19,7 +19,7 @@ tags: c++ 虚函数 虚继承
 A 类中实现了对方法 `printA` 的重载。__注意，仅仅函数返回值不同不构成函数重载。__
 
 函数重载时，编译器根据函数参数表的不同，对同名函数做修饰，然后这些同名函数就变成了不同的函数。通过查看符号表就能看出 <br>
-![overload sign tb](http://oszgzpzz4.bkt.clouddn.com/image/virtual_func_inherit/overload.PNG)
+![overload sign tb](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/virtual_func_inherit/overload.PNG)
 
 这两个函数的调用，在编译期间就已经确定了，是静态的，他们的地址在编译期间就绑定了。所以说，重载与多态无关，这只是C++语言的一种特性。
 
@@ -105,7 +105,7 @@ C++中虚函数的作用主要是实现多态的机制。多态的本质，就�
 	C c;
 	
 用 GDB 调试器查看这三个对象的结果如下所示 <br>
-![object structure](http://oszgzpzz4.bkt.clouddn.com/image/virtual_func_inherit/object_struct.PNG)
+![object structure](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/virtual_func_inherit/object_struct.PNG)
 
 可以查看，对象 a 只有一个指向虚函数表的指针 _vptr.A，所以 sizeof(a) 是 8(64位系统)，对象 b 与 a 相同。再看 c，c 继承了类 A 和类 B，所以有两个指向虚函数表的指针 `_vptr.A` 和 `_vptr.B`，同时，c 自己的虚函数指针也是保存在 `_vptr.A` 这个指针所指向的虚函数表里面，因为这是最前面的那个指向的虚函数表。
 
@@ -122,7 +122,7 @@ c 所指向的虚函数表的指针在最前面的话，那么
 	(long*)((long*)*((long*)&c + 0) + 0);
 	
 这就相当于是一个二维指针(因为现在有两个虚函数表指针)，将上述这个指针转换成函数指针，直接调用就能访问类中的成员函数，结果类似下图 <br>
-![virtual function pointer](http://oszgzpzz4.bkt.clouddn.com/image/virtual_func_inherit/virtual_func_pointer.png)
+![virtual function pointer](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/virtual_func_inherit/virtual_func_pointer.png)
 
 	Func funcp = NULL;
 	funcp = (Func)*(long*)((long*)*((long*)&c + 0) + 0);
@@ -175,7 +175,7 @@ c 所指向的虚函数表的指针在最前面的话，那么
 {% endhighlight %}
 	
 此时，c 的结构不变，但是虚函数表中的函数指针将发生了变化，因为发生了覆盖，如下所示 <br>
-![virtual function override](http://oszgzpzz4.bkt.clouddn.com/image/virtual_func_inherit/virtual_func_override.png)
+![virtual function override](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/virtual_func_inherit/virtual_func_override.png)
 
 可知，c 中虚函数表指针指向的虚函数表中，继承自 a 的虚函数 aa1() 被子类 c 覆盖。 <br>
 仍用上述函数指针输出，输出结果变为

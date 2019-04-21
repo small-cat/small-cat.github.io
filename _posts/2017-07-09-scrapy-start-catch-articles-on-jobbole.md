@@ -38,7 +38,7 @@ virtualenv 能够通过根据不同的 python 版本创建对应不同版本的�
     workon py3Scrapy # 进入选择的虚拟环境
 
 如下图所示： <br>
-![进入虚拟环境](http://oszgzpzz4.bkt.clouddn.com/image/scrapy_starter_catch_jobbole/enter_virtualenv.png)
+![进入虚拟环境](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/spider_on_jobble/1.png)
 
 python的版本也能查看得到，进入虚拟环境之后，在shell前面会出现虚拟环境的名称，退出虚拟环境
 
@@ -73,9 +73,9 @@ scrapy 是基于 twisted 框架的，大家会发现，安装 scrapy 的时候�
     scrapy shell "http://blog.jobbole.com/111469/"
 
 scrapy 将会帮助我们将`http://blog.jobbole.com/111469/`这个链接的数据捕获，现在来获取一下文章标题，在浏览器中找到文章标题，`inspect element` 审查元素，如下图所示：<br>
-![css get title](http://oszgzpzz4.bkt.clouddn.com/image/scrapy_starter_catch_jobbole/css_title.png)<br>
+![css get title](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/spider_on_jobble/2.png)<br>
 文章标题为**王垠：如何掌握所有的程序语言**，从上图获知，这个位于一个 class 名为 `entry-header` 的 div 标签下的子标签 h1 中，那我们在 scrapy shell 通过 css 选择器来获取一下，如下图所示：<br>
-![get title](http://oszgzpzz4.bkt.clouddn.com/image/scrapy_starter_catch_jobbole/get_title.png)<br>
+![get title](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/spider_on_jobble/3.png)<br>
 仔细查看上图，注意一些细节。通过 response.css 方法，返回的结果是一个 selector，不是字符串，在这个 selector 的基础上可以继续使用 css 选择器。通过 extract() 函数获取提取的标题内容，返回结果是一个 list，注意，这里是一个 list ，仍然不是字符串 str，使用 extract()[0] 返回列表中的第一个元素，即我们需要的标题。
 
 但是，如果标题没有获取到，或者选择器返回的结果为空的话，使用 extract()[0] 就会出错，因为试图对一个空链表进行访问，这里使用 extract_first() 方法更加合适，可是使用一个默认值，当返回结果为空的时候，返回这个默认值
@@ -183,15 +183,15 @@ scrapy 为我们创建了一个 JobboleSpider 的类，name 是爬虫项目的�
 既然我们已经能够获取到某一篇文章的数据，那么下面就来获取所有文章的链接。
 ## 扩展一：获取所有 url 链接
 伯乐在线所有文章链接的入口地址为 `http://blog.jobbole.com/all-posts/`，通过浏览器进入调试模式查看文章列表的链接，如下图所示<br>
-![文章列表链接](http://oszgzpzz4.bkt.clouddn.com/image/scrapy_starter_catch_jobbole/article_link_css.png)<br>
+![文章列表链接](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/spider_on_jobble/4.png)<br>
 文章链接是在 id 为 archive 的 div 标签下的子 div 标签之下， class 为 post-thumb，这个下面的子标签 a 的 href 属性，仍使用上面说的 scrapy shell 的方法，如下图所示 <br>
-![url list](http://oszgzpzz4.bkt.clouddn.com/image/scrapy_starter_catch_jobbole/url_list.png)<br>
+![url list](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/spider_on_jobble/5.png)<br>
 可以看出，获得了当前页面所有的文章的 url，这仅仅是当前页面的所有 url，我们还需要获取下一页的 url，然后通过下一页的 url 进入到下一页，获取下一页的所有文章的 url，依次类推，知道爬取完所有的文章 url。
 
 在文章列表的最后，有翻页，分析如下<br>
-![next url](http://oszgzpzz4.bkt.clouddn.com/image/scrapy_starter_catch_jobbole/next_url.png)<br>
+![next url](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/spider_on_jobble/6.png)<br>
 下一页是 class 为 next page-numbers 的 a 标签中，如下图 <br>
-![get next url](http://oszgzpzz4.bkt.clouddn.com/image/scrapy_starter_catch_jobbole/get_next_url.png)<br>
+![get next url](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/spider_on_jobble/7.png)<br>
 既然现在所有的 url 都能够获取到了，那么现在我们将 jobbole.py 中的 parse 函数修改一下
 
 {% highlight ruby %}
@@ -535,7 +535,7 @@ scrapy.exporters 提供了几种不同格式的文件支持，能够将数据输
 前面介绍了将数据以 json 格式导出到文件，那么将数据保存到 MySQL 中，如何操作，相信大家已经差不多了然于胸了。这里也介绍两种方法，一种是通过 MySQLdb 的API来实现的数据库存取操作，这种方法简单，适合用与数据量不大的场合，如果数据量大，数据库操作的速度跟不上数据解析的速度，就会造成数据拥堵。那么使用第二种方法就更好，使用 twisted 框架提供的异步操作方法，不会造成拥堵，速度更快。
 
 既然是入 MySQL 数据库，首先肯定是需要创建数据库表了。表结构如下图所示： <br>
-![desc article](http://oszgzpzz4.bkt.clouddn.com/image/scrapy_starter_catch_jobbole/desc_mysql_table.png) <br>
+![desc article](https://github.com/small-cat/small-cat.github.io/raw/master/_pics/spider_on_jobble/8.png) <br>
 上图中有一个字段的值，我没有讲述怎么取，就是 `front_img_path` 这个值，大家在数据库入库的时候，直接用空置或者空字符串填充即可。这个字段是保存图片在本地保存的路径，这个需要在 ImagesPipe 的 `item_completed(self, results, item, info)` 方法中的 results 参数中获取。
 
 好了，数据库表创建成功之后，下面就来将数据入库了。
