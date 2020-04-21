@@ -1,0 +1,624 @@
+<p>redis 中 lua 环境解析</p>
+
+<p>redis 中，lua 环境的初始化，是从 <code class="highlighter-rouge">redis.c/initServer()</code> 函数中，调用 <code class="highlighter-rouge">scriptingInit()</code> 函数开始的。</p>
+
+<p>关于 <code class="highlighter-rouge">scriptingInit()</code> 的描述</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Initialize the scripting environment.
+ * It is possible to call this function to reset the scripting environment
+ * assuming that we call scriptingRelease() before.
+ * See scriptingReset() for more information. */
+</code></pre></div></div>
+
+<p>也就是说，这个函数是初始化lua环境的，当然，如果调用了 <code class="highlighter-rouge">scriptingRelease()</code> 在调用该函数，可以重置 lua 脚本环境。我们进入到函数中看一下代码。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">void</span> <span class="n">scriptingInit</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">lua_State</span> <span class="o">*</span><span class="n">lua</span> <span class="o">=</span> <span class="n">lua_open</span><span class="p">();</span>
+	
+	    <span class="n">luaLoadLibraries</span><span class="p">(</span><span class="n">lua</span><span class="p">);</span>
+	    <span class="n">luaRemoveUnsupportedFunctions</span><span class="p">(</span><span class="n">lua</span><span class="p">);</span>
+	
+	    <span class="sr">/* Initialize a dictionary we use to map SHAs to scripts.
+	     * This is useful for replication, as we need to replicate EVALSHA
+	     * as EVAL, so we need to remember the associated script. */</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">lua_scripts</span> <span class="o">=</span> <span class="n">dictCreate</span><span class="p">(</span><span class="o">&amp;</span><span class="n">shaScriptObjectDictType</span><span class="p">,</span><span class="no">NULL</span><span class="p">);</span>
+	
+	    <span class="sr">/* Register the redis commands table and fields */</span>
+	    <span class="n">lua_newtable</span><span class="p">(</span><span class="n">lua</span><span class="p">);</span>
+	
+	    <span class="sr">/* redis.call */</span>
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"call"</span><span class="p">);</span>
+	    <span class="n">lua_pushcfunction</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="n">luaRedisCallCommand</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	
+	    <span class="sr">/* redis.pcall */</span>
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"pcall"</span><span class="p">);</span>
+	    <span class="n">lua_pushcfunction</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="n">luaRedisPCallCommand</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	
+	    <span class="sr">/* redis.log and log levels. */</span>
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"log"</span><span class="p">);</span>
+	    <span class="n">lua_pushcfunction</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="n">luaLogCommand</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"LOG_DEBUG"</span><span class="p">);</span>
+	    <span class="n">lua_pushnumber</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="no">REDIS_DEBUG</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"LOG_VERBOSE"</span><span class="p">);</span>
+	    <span class="n">lua_pushnumber</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="no">REDIS_VERBOSE</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"LOG_NOTICE"</span><span class="p">);</span>
+	    <span class="n">lua_pushnumber</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="no">REDIS_NOTICE</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"LOG_WARNING"</span><span class="p">);</span>
+	    <span class="n">lua_pushnumber</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="no">REDIS_WARNING</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	
+	    <span class="sr">/* redis.sha1hex */</span>
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="s2">"sha1hex"</span><span class="p">);</span>
+	    <span class="n">lua_pushcfunction</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="n">luaRedisSha1hexCommand</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	
+	    <span class="sr">/* redis.error_reply and redis.status_reply */</span>
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="s2">"error_reply"</span><span class="p">);</span>
+	    <span class="n">lua_pushcfunction</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="n">luaRedisErrorReplyCommand</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="s2">"status_reply"</span><span class="p">);</span>
+	    <span class="n">lua_pushcfunction</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="n">luaRedisStatusReplyCommand</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	
+	    <span class="sr">/* Finally set the table as 'redis' global var. */</span>
+	    <span class="n">lua_setglobal</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"redis"</span><span class="p">);</span>
+	
+	    <span class="sr">/* Replace math.random and math.randomseed with our implementations. */</span>
+	    <span class="n">lua_getglobal</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"math"</span><span class="p">);</span>
+	
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"random"</span><span class="p">);</span>
+	    <span class="n">lua_pushcfunction</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="n">redis_math_random</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"randomseed"</span><span class="p">);</span>
+	    <span class="n">lua_pushcfunction</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="n">redis_math_randomseed</span><span class="p">);</span>
+	    <span class="n">lua_settable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">3</span><span class="p">);</span>
+	
+	    <span class="n">lua_setglobal</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"math"</span><span class="p">);</span>
+	
+	    <span class="sr">/* Add a helper function that we use to sort the multi bulk output of non
+	     * deterministic commands, when containing 'false' elements. */</span>
+	    <span class="p">{</span>
+	        <span class="n">char</span> <span class="o">*</span><span class="n">compare_func</span> <span class="o">=</span>    <span class="s2">"function __redis__compare_helper(a,b)</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"  if a == false then a = '' end</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"  if b == false then b = '' end</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"  return a&lt;b</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"end</span><span class="se">\n</span><span class="s2">"</span><span class="p">;</span>
+	        <span class="n">luaL_loadbuffer</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="n">compare_func</span><span class="p">,</span><span class="n">strlen</span><span class="p">(</span><span class="n">compare_func</span><span class="p">),</span><span class="s2">"@cmp_func_def"</span><span class="p">);</span>
+	        <span class="n">lua_pcall</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Add a helper function we use for pcall error reporting.
+	     * Note that when the error is in the C function we want to report the
+	     * information about the caller, that's what makes sense from the point
+	     * of view of the user debugging a script. */</span>
+	    <span class="p">{</span>
+	        <span class="n">char</span> <span class="o">*</span><span class="n">errh_func</span> <span class="o">=</span>       <span class="s2">"local dbg = debug</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"function __redis__err__handler(err)</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"  local i = dbg.getinfo(2,'nSl')</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"  if i and i.what == 'C' then</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"    i = dbg.getinfo(3,'nSl')</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"  end</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"  if i then</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"    return i.source .. ':' .. i.currentline .. ': ' .. err</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"  else</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"    return err</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"  end</span><span class="se">\n</span><span class="s2">"</span>
+	                                <span class="s2">"end</span><span class="se">\n</span><span class="s2">"</span><span class="p">;</span>
+	        <span class="n">luaL_loadbuffer</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="n">errh_func</span><span class="p">,</span><span class="n">strlen</span><span class="p">(</span><span class="n">errh_func</span><span class="p">),</span><span class="s2">"@err_handler_def"</span><span class="p">);</span>
+	        <span class="n">lua_pcall</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Create the (non connected) client that we use to execute Redis commands
+	     * inside the Lua interpreter.
+	     * Note: there is no need to create it again when this function is called
+	     * by scriptingReset(). */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">lua_client</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">lua_client</span> <span class="o">=</span> <span class="n">createClient</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">lua_client</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_LUA_CLIENT</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Lua beginners often don't use "local", this is likely to introduce
+	     * subtle bugs in their code. To prevent problems we protect accesses
+	     * to global variables. */</span>
+	    <span class="n">scriptingEnableGlobalsProtection</span><span class="p">(</span><span class="n">lua</span><span class="p">);</span>
+	
+	    <span class="n">server</span><span class="p">.</span><span class="nf">lua</span> <span class="o">=</span> <span class="n">lua</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>1、 lua_open() 函数，创建一个lua环境 <br />
+2、 <code class="highlighter-rouge">luaLoadLibraries(lua)</code>，在新创建的lua环境中载入相应的库，同时删除库中不需要的函数，防止从外部引入不安全的代码 <code class="highlighter-rouge">luaRemoveUnsupportedFunctions(lua)</code>，</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>void luaLoadLibraries(lua_State *lua) {
+    luaLoadLib(lua, "", luaopen_base);
+    luaLoadLib(lua, LUA_TABLIBNAME, luaopen_table);
+    luaLoadLib(lua, LUA_STRLIBNAME, luaopen_string);
+    luaLoadLib(lua, LUA_MATHLIBNAME, luaopen_math);
+    luaLoadLib(lua, LUA_DBLIBNAME, luaopen_debug);
+    luaLoadLib(lua, "cjson", luaopen_cjson);
+    luaLoadLib(lua, "struct", luaopen_struct);
+    luaLoadLib(lua, "cmsgpack", luaopen_cmsgpack);
+    luaLoadLib(lua, "bit", luaopen_bit);
+
+#if 0 /* Stuff that we don't load currently, for sandboxing concerns. */
+    luaLoadLib(lua, LUA_LOADLIBNAME, luaopen_package);
+    luaLoadLib(lua, LUA_OSLIBNAME, luaopen_os);
+#endif
+}
+
+/* Remove a functions that we don't want to expose to the Redis scripting
+ * environment. */
+void luaRemoveUnsupportedFunctions(lua_State *lua) {
+    lua_pushnil(lua);	//将空值入栈，此时栈顶元素为空值
+    lua_setglobal(lua,"loadfile");	//出栈，取出栈顶元素，即空值，并将其作为 loadfile 的值，也就相当于取消了 loadfile 这个函数的作用，置空了
+}
+</code></pre></div></div>
+
+<p>3、 <code class="highlighter-rouge">lua_newtable(lua)</code> 创建一张空表，并入栈 <br />
+4、 将 c 中的luaRedisCallCommand 函数压入栈，作为表的函数；将 c 中的luaRedisPCallCommand 函数入栈，作为表的函数；将 c 中的luaLogCommand 函数入栈作为表的函数；将表复制为 redis，即创建 redis 全局 table。下面对其中一个注册函数进行解释</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>lua_newtable(lua);
+
+/* redis.call */
+lua_pushstring(lua,"call");
+lua_pushcfunction(lua,luaRedisCallCommand);
+lua_settable(lua,-3);
+</code></pre></div></div>
+
+<p>首先创建一个空表，入栈，此时栈顶元素为 table。然后将字符串 “call” 入栈，再将 c 函数 luaRedisCallCommand 函数入栈</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>lua_settable(lua, -3)
+</code></pre></div></div>
+
+<p>意思是 t[k]=v，t 为索引-3，栈中，-3 位元素 table，-1 为 luaRedisCallCommand，-2 为字符串call，v 表示栈顶元素，k表示栈顶元素的下一个元素，索引上面这个函数的意思就是</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>table[call]=luaRedisCallCommand
+</code></pre></div></div>
+
+<p>就是将lua 中的call 函数注册为 c 中的 luaRedisCallCommand 函数，也可以记为</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>table.call=luaRedisCallCommand
+</code></pre></div></div>
+
+<p>后面代码意思都雷同，都是注册 c 函数到 lua 中。</p>
+
+<p><strong>注意：</strong> <code class="highlighter-rouge">lua_settable(lua_State *L, int index)</code> 会将栈顶两个元素弹出。</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>lua_setglobal(lua, "redis")
+</code></pre></div></div>
+
+<p>将表作为 redis的值，即创建的表为 redis 表，该表中包含以下函数： <br /></p>
+
+<ul>
+  <li>redis.call 函数和 redis.pcall 函数，用户执行 redis 命令</li>
+  <li>redis.log 记录日志，日志级别对应为 <code class="highlighter-rouge">redid.LOG_DEBUG</code>， <code class="highlighter-rouge">redis.LOG_VERBOSE</code>，<code class="highlighter-rouge">redis.LOG_NOTICE</code>，<code class="highlighter-rouge">redis.LOG_WARNING</code></li>
+  <li>redis.sha1hex，计算 SHA1 校验和</li>
+  <li><code class="highlighter-rouge">redis.error_reply</code> 和 <code class="highlighter-rouge">redis.status_reply</code> 函数，返回 redis 错误信息</li>
+</ul>
+
+<p>5、 用 c 中自制的随机函数替换 Lua 中原有的随机函数 <br />
+6、 创建排序辅助函数， Lua 环境使用这个辅助函数来对一部分 redis 命令的结果进行排序，从而消除这些命令的不确定性。 <br /></p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">function</span> <span class="n">__redis__compare_helper</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="n">b</span><span class="p">)</span>
+	    <span class="k">if</span> <span class="n">a</span> <span class="o">==</span> <span class="kp">false</span> 
+		<span class="k">then</span> 
+			<span class="n">a</span> <span class="o">=</span> <span class="s1">''</span> 
+		<span class="k">end</span>
+	    <span class="k">if</span> <span class="n">b</span> <span class="o">==</span> <span class="kp">false</span> 
+		<span class="k">then</span> 
+			<span class="n">b</span> <span class="o">=</span> <span class="s1">''</span> 
+		<span class="k">end</span>
+	    <span class="k">return</span> <span class="n">a</span><span class="o">&lt;</span><span class="n">b</span>
+	<span class="k">end</span></code></pre></figure>
+
+<p>7、 创建 redis.pcall 函数的错误报告辅助函数，这个函数可以提供更加详细发出错信息，比如能够在 c 函数的出错信息中提供调用者的信息</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">local</span> <span class="n">dbg</span> <span class="o">=</span> <span class="n">debug</span><span class="p">;</span>
+	<span class="n">function</span> <span class="n">__redis_err_handler</span><span class="p">(</span><span class="n">err</span><span class="p">)</span>
+		<span class="n">local</span> <span class="n">i</span> <span class="o">=</span> <span class="n">dbg</span><span class="p">.</span><span class="nf">getinfo</span> <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="s1">'sS1'</span><span class="p">)</span>
+		<span class="k">if</span> <span class="n">i</span> <span class="n">and</span> <span class="n">i</span><span class="p">.</span><span class="nf">what</span> <span class="o">=</span> <span class="s1">'C'</span>
+		<span class="k">then</span>
+			<span class="n">i</span> <span class="o">=</span> <span class="n">dgb</span><span class="p">.</span><span class="nf">getinfo</span> <span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="s1">'nS1'</span><span class="p">)</span>
+		<span class="k">end</span>
+		<span class="k">if</span> <span class="n">i</span>
+		<span class="k">then</span>
+			<span class="k">return</span> <span class="n">i</span><span class="p">.</span><span class="nf">source</span> <span class="o">..</span> <span class="s1">':'</span> <span class="o">..</span> <span class="n">i</span><span class="p">.</span><span class="nf">currentLine</span> <span class="o">..</span> <span class="s1">':'</span> <span class="o">..</span> <span class="n">err</span>
+		<span class="k">else</span>
+			<span class="k">return</span> <span class="n">err</span>
+		<span class="k">end</span>
+	<span class="k">end</span></code></pre></figure>
+
+<p>8、 对 lua 环境中的全局环境进行保护，防止用户在执行 lua 脚本的过程中，将额外的全局变量添加到 Lua 环境中 <br />
+9、 将完成修改的 lua 环境保存到服务器状态的 lua 属性中。</p>
+
+<h2 id="创建排序辅助函数-__redis__compare_helper">创建排序辅助函数 <code class="highlighter-rouge">__redis__compare_helper</code></h2>
+<p>在 redis 中产生不同输出的命令称为“带有不确定性的命令”，比如： <br /></p>
+
+<ul>
+  <li>SINTER</li>
+  <li>SUNION</li>
+  <li>SDIFF</li>
+  <li>SMEMBERS</li>
+  <li>HKEYS</li>
+  <li>HVALS</li>
+  <li>KEYS</li>
+</ul>
+
+<p>比如对 <code class="highlighter-rouge">SMEMBERS</code> 来说，在两个值相同，但是顺序不同的集合中，使用 SMEMBERS 得到的结果是不同的，输出的值的顺序不同。这样的输出就是不确定性，因为它本身不会排序。而 lua 中创建的这个辅助排序函数，可以用来消除这种不确定性。当 lua 执行完一个带有不确定性的命令时，程序会使用 <code class="highlighter-rouge">__redis__compare_helper</code> 作为对比函数，自动调用 tables.sort 函数对命令进行一次排序，一次来保证相同的数据集总是产生相同的输出。</p>
+
+<p>那，到底是什么一个代码流程呢，因为 redis.call 和 redis.pcall 在初始化的时候，已经使用 c 中的函数进行了注册，所以当调用 redis.call 或者 redis.pcall 的时候实际唤醒调用的是 c 函数 luaRedisCallCommand 或者 luaRedisPCallCommand</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>int luaRedisCallCommand(lua_State *lua) {
+    return luaRedisGenericCommand(lua,1);
+}
+
+int luaRedisPCallCommand(lua_State *lua) {
+    return luaRedisGenericCommand(lua,0);
+}
+</code></pre></div></div>
+
+<p>这两个函数，都是调用的 <code class="highlighter-rouge">luaRedisGenericCommand</code> 函数，此时，在 <code class="highlighter-rouge">luaGenericCommand</code> 函数中，在满足条件的情况下，调用 <code class="highlighter-rouge">luaSortArray</code> 函数。</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>if ((cmd-&gt;flags &amp; REDIS_CMD_SORT_FOR_SCRIPT) &amp;&amp;
+    (reply[0] == '*' &amp;&amp; reply[1] != '-')) {
+        luaSortArray(lua);
+}
+</code></pre></div></div>
+
+<p>满足上面条件的时候，才调用 <code class="highlighter-rouge">luaSortArray</code> 这个函数，函数定义如下所示</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Sort the array currently in the stack. We do this to make the output
+	 * of commands like KEYS or SMEMBERS something deterministic when called
+	 * from Lua (to play well with AOf/</span><span class="n">replication</span><span class="p">).</span>
+	 <span class="nf">*</span>
+	 <span class="o">*</span> <span class="no">The</span> <span class="n">array</span> <span class="n">is</span> <span class="n">sorted</span> <span class="n">using</span> <span class="n">table</span><span class="p">.</span><span class="nf">sort</span> <span class="n">itself</span><span class="p">,</span> <span class="n">and</span> <span class="n">assuming</span> <span class="n">all</span> <span class="n">the</span>
+	 <span class="o">*</span> <span class="n">list</span> <span class="n">elements</span> <span class="n">are</span> <span class="n">strings</span><span class="p">.</span> <span class="nf">*</span><span class="o">/</span>
+	<span class="n">void</span> <span class="n">luaSortArray</span><span class="p">(</span><span class="n">lua_State</span> <span class="o">*</span><span class="n">lua</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="sr">/* Initial Stack: array */</span>
+	    <span class="n">lua_getglobal</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"table"</span><span class="p">);</span>
+	    <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"sort"</span><span class="p">);</span>
+	    <span class="n">lua_gettable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">2</span><span class="p">);</span>       <span class="sr">/* Stack: array, table, table.sort */</span>
+	    <span class="n">lua_pushvalue</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">3</span><span class="p">);</span>      <span class="sr">/* Stack: array, table, table.sort, array */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">lua_pcall</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="mi">0</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="sr">/* Stack: array, table, error */</span>
+	
+	        <span class="sr">/* We are not interested in the error, we assume that the problem is
+	         * that there are 'false' elements inside the array, so we try
+	         * again with a slower function but able to handle this case, that
+	         * is: table.sort(table, __redis__compare_helper) */</span>
+	        <span class="n">lua_pop</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>             <span class="sr">/* Stack: array, table */</span>
+	        <span class="n">lua_pushstring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"sort"</span><span class="p">);</span> <span class="sr">/* Stack: array, table, sort */</span>
+	        <span class="n">lua_gettable</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">2</span><span class="p">);</span>       <span class="sr">/* Stack: array, table, table.sort */</span>
+	        <span class="n">lua_pushvalue</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">3</span><span class="p">);</span>      <span class="sr">/* Stack: array, table, table.sort, array */</span>
+	        <span class="n">lua_getglobal</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="s2">"__redis__compare_helper"</span><span class="p">);</span>	<span class="sr">//</span><span class="n">table</span><span class="p">.</span><span class="nf">sort</span><span class="p">(</span><span class="n">list</span> <span class="p">[,</span><span class="n">compare</span><span class="p">])</span>
+	        <span class="sr">/* Stack: array, table, table.sort, array, __redis__compare_helper */</span>
+	        <span class="n">lua_call</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+	    <span class="p">}</span>
+	    <span class="sr">/* Stack: array (sorted), table */</span>
+	    <span class="n">lua_pop</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>             <span class="sr">/* Stack: array (sorted) */</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>将 table.sort 中的 comp 参数作为 <code class="highlighter-rouge">__redis_compare_helper</code> 辅助排序函数进行排序</p>
+
+<h1 id="lua-环境协作组件">lua 环境协作组件</h1>
+<p>lua 服务器创建了两个用于与 lua 环境进行写作的组件，分别是负责执行 lua 脚本的 redis 命令的伪客户端和保存 lua 脚本的 <code class="highlighter-rouge">lua_scripts</code> 字典。</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>typedef struct Server {
+	...
+	/* Scripting */
+    lua_State *lua; /* The Lua interpreter. We use just one for all clients */
+    redisClient *lua_client;   /* The "fake client" to query Redis from Lua */
+    redisClient *lua_caller;   /* The client running EVAL right now, or NULL */
+    dict *lua_scripts;         /* A dictionary of SHA1 -&gt; Lua scripts */
+    mstime_t lua_time_limit;  /* Script timeout in milliseconds */
+    mstime_t lua_time_start;  /* Start time of script, milliseconds time */
+    int lua_write_dirty;  /* True if a write command was called during the
+                             execution of the current script. */
+    int lua_random_dirty; /* True if a random command was called during the
+                             execution of the current script. */
+    int lua_timedout;     /* True if we reached the time limit for script
+                             execution. */
+    int lua_kill;         /* Kill the script if true. */
+	...
+};
+</code></pre></div></div>
+
+<h2 id="伪客户端">伪客户端</h2>
+<p>redis 命令执行必须有相应的客户端状态，redis服务器专门为 lua 环境创建了一个伪客户端，server 中的 lua_client 成员就是 lua 的伪客户端，当初始化 lua 环境时，对伪客户端初始化如下(scriptingInit())：</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>   /* Create the (non connected) client that we use to execute Redis commands
+     * inside the Lua interpreter.
+     * Note: there is no need to create it again when this function is called
+     * by scriptingReset(). */
+    if (server.lua_client == NULL) {
+        server.lua_client = createClient(-1);
+        server.lua_client-&gt;flags |= REDIS_LUA_CLIENT;
+    }
+</code></pre></div></div>
+
+<p>Lua 脚本使用 redis.call 或者 redis.pcall 执行 redis 命令的时候，步骤如下： <br /></p>
+
+<blockquote>
+  <ul>
+    <li>Lua 环境将 redis.call 或者 redis.pcall 想要执行的命令传给伪客户端</li>
+    <li>伪客户端将脚本想要执行的命令传给命令执行器 (call)</li>
+    <li>命令执行器执行命令后，将结果返回给伪客户端</li>
+    <li>伪客户端接收到结果并将结果返回给 lua 环境</li>
+    <li>lua 环境接收到结果之后，有将结果返回给 redis.call 或者 redis.pcall 函数</li>
+    <li>接收到结果的 redis.call 或者 redis.pcall 函数，将命令结果作为函数返回值返回给脚本中的调用者。<br />
+<strong>以上步骤摘自 《Redis 设计与实现》 黄健宏著，机械工业出版社，20.1.1节 伪客户端</strong></li>
+  </ul>
+</blockquote>
+
+<p>使用客户端执行lua脚本</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>./redis-cli -h ${IP} -p ${PORT} -a ${PASSWORD} --eval &lt;lua script&gt;
+</code></pre></div></div>
+
+<h2 id="lua_scripts-字典">lua_scripts 字典</h2>
+<p>另一个lua环境协作组件是 <code class="highlighter-rouge">lua_scripts</code> 字典。这个字典的值，是 lua 对应的脚本，键是 lua 脚本的 SHA1 校验和。这个可以在 <code class="highlighter-rouge">scripting.c/luaCreateFunction()</code> 函数中查看</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>  {
+        int retval = dictAdd(server.lua_scripts,
+                             sdsnewlen(funcname+2,40),body);	//dict, key is sha1, value is script
+        redisAssertWithInfo(c,NULL,retval == DICT_OK);
+        incrRefCount(body);
+  }
+</code></pre></div></div>
+
+<p>funcname 就是 lua 脚本的SHA1校验和，body 就是 lua 对应的脚本</p>
+
+<h1 id="eval-命令的实现">EVAL 命令的实现</h1>
+<p><strong>第一步：</strong> <br />
+当客户端向服务器发送 EVAL 命令执行一段 lua 脚本的时候，服务器首先在 lua 环境中，为传入的脚本定义一个 lua 函数，函数名由 f_ 前缀加上脚本的 SHA1 校验和，而函数体即为脚本本身。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">void</span> <span class="n">evalGenericCommand</span><span class="p">(</span><span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span><span class="p">,</span> <span class="n">int</span> <span class="n">evalsha</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">lua_State</span> <span class="o">*</span><span class="n">lua</span> <span class="o">=</span> <span class="n">server</span><span class="p">.</span><span class="nf">lua</span><span class="p">;</span>
+	    <span class="n">char</span> <span class="n">funcname</span><span class="p">[</span><span class="mi">43</span><span class="p">];</span>
+	    <span class="n">long</span> <span class="n">long</span> <span class="n">numkeys</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">delhook</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="n">err</span><span class="p">;</span>
+	
+	    <span class="sr">/* We want the same PRNG sequence at every call so that our PRNG is
+	     * not affected by external state. */</span>
+	    <span class="n">redisSrand48</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+	
+	    <span class="sr">/* We set this flag to zero to remember that so far no random command
+	     * was called. This way we can allow the user to call commands like
+	     * SRANDMEMBER or RANDOMKEY from Lua scripts as far as no write command
+	     * is called (otherwise the replication and AOF would end with non
+	     * deterministic sequences).
+	     *
+	     * Thanks to this flag we'll raise an error every time a write command
+	     * is called after a random command was used. */</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">lua_random_dirty</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">lua_write_dirty</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	
+	    <span class="sr">/* Get the number of arguments that are keys */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">getLongLongFromObjectOrReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span><span class="o">&amp;</span><span class="n">numkeys</span><span class="p">,</span><span class="no">NULL</span><span class="p">)</span> <span class="o">!=</span> <span class="no">REDIS_OK</span><span class="p">)</span>
+	        <span class="k">return</span><span class="p">;</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">numkeys</span> <span class="o">&gt;</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span> <span class="o">-</span> <span class="mi">3</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="n">addReplyError</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="s2">"Number of keys can't be greater than number of args"</span><span class="p">);</span>
+	        <span class="k">return</span><span class="p">;</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">numkeys</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">addReplyError</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="s2">"Number of keys can't be negative"</span><span class="p">);</span>
+	        <span class="k">return</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* We obtain the script SHA1, then check if this function is already
+	     * defined into the Lua state */</span>
+	    <span class="n">funcname</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'f'</span><span class="p">;</span>
+	    <span class="n">funcname</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'_'</span><span class="p">;</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">evalsha</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="sr">/* Hash the code if this is an EVAL call */</span>
+	        <span class="n">sha1hex</span><span class="p">(</span><span class="n">funcname</span><span class="o">+</span><span class="mi">2</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span><span class="n">sdslen</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">));</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="sr">/* We already have the SHA if it is a EVALSHA */</span>
+	        <span class="n">int</span> <span class="n">j</span><span class="p">;</span>
+	        <span class="n">char</span> <span class="o">*</span><span class="n">sha</span> <span class="o">=</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">;</span>
+	
+	        <span class="sr">/* Convert to lowercase. We don't use tolower since the function
+	         * managed to always show up in the profiler output consuming
+	         * a non trivial amount of time. */</span>
+	        <span class="k">for</span> <span class="p">(</span><span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="mi">40</span><span class="p">;</span> <span class="n">j</span><span class="o">++</span><span class="p">)</span>
+	            <span class="n">funcname</span><span class="p">[</span><span class="n">j</span><span class="o">+</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">sha</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="s1">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">sha</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="s1">'Z'</span><span class="p">)</span> <span class="p">?</span>
+	                <span class="n">sha</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="o">+</span><span class="p">(</span><span class="s1">'a'</span><span class="o">-</span><span class="s1">'A'</span><span class="p">)</span> <span class="p">:</span> <span class="n">sha</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+	        <span class="n">funcname</span><span class="p">[</span><span class="mi">42</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'\0'</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Push the pcall error handler function on the stack. */</span>
+	    <span class="n">lua_getglobal</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="s2">"__redis__err__handler"</span><span class="p">);</span>
+	
+	    <span class="sr">/* Try to lookup the Lua function */</span>
+	    <span class="n">lua_getglobal</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="n">funcname</span><span class="p">);</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">lua_isnil</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">1</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="n">lua_pop</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span> <span class="sr">/* remove the nil from the stack */</span>
+	        <span class="sr">/* Function not defined... let's define it if we have the
+	         * body of the function. If this is an EVALSHA call we can just
+	         * return an error. */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">evalsha</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">lua_pop</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span> <span class="sr">/* remove the error handler from the stack. */</span>
+	            <span class="n">addReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span> <span class="n">shared</span><span class="p">.</span><span class="nf">noscripterr</span><span class="p">);</span>
+	            <span class="k">return</span><span class="p">;</span>
+	        <span class="p">}</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">luaCreateFunction</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">lua</span><span class="p">,</span><span class="n">funcname</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span> <span class="o">==</span> <span class="no">REDIS_ERR</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">lua_pop</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span> <span class="sr">/* remove the error handler from the stack. */</span>
+	            <span class="sr">/* The error is sent to the client by luaCreateFunction()
+	             * itself when it returns REDIS_ERR. */</span>
+	            <span class="k">return</span><span class="p">;</span>
+	        <span class="p">}</span>
+	        <span class="sr">/* Now the following is guaranteed to return non nil */</span>
+	        <span class="n">lua_getglobal</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span> <span class="n">funcname</span><span class="p">);</span>
+	        <span class="n">redisAssert</span><span class="p">(</span><span class="o">!</span><span class="n">lua_isnil</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">1</span><span class="p">));</span>
+	    <span class="p">}</span>
+		<span class="o">...</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>首先解析参数，可以查看 EVAL 命令的语法</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>EVAL script numkeys key [key ...] arg [arg ...]
+</code></pre></div></div>
+
+<p>在 lua 环境创建对应的 lua 函数，保存在变量 funcname 中，</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>funcname[0] = 'f';
+funcname[1] = '_';
+</code></pre></div></div>
+
+<p>表示函数名以 f_ 作为前缀，使用 shahex1() 函数获取脚本的 SHA1 校验和，保存在 funcname 中，此时的 funcname 将作为 lua 环境中脚本对应的函数名。使用 <code class="highlighter-rouge">luaCreateFunction</code> 函数在 lua 环境中创建该脚本的 lua 函数，同时将脚本即 lua 环境中对应的函数名加入到 <code class="highlighter-rouge">lua_scripts</code> 字典中。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Define a lua function with the specified function name and body.
+	 * The function name musts be a 2 characters long string, since all the
+	 * functions we defined in the Lua context are in the form:
+	 *
+	 *   f_&lt;hex sha1 sum&gt;
+	 *
+	 * On success REDIS_OK is returned, and nothing is left on the Lua stack.
+	 * On error REDIS_ERR is returned and an appropriate error is set in the
+	 * client context. */</span>
+	<span class="n">int</span> <span class="n">luaCreateFunction</span><span class="p">(</span><span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span><span class="p">,</span> <span class="n">lua_State</span> <span class="o">*</span><span class="n">lua</span><span class="p">,</span> <span class="n">char</span> <span class="o">*</span><span class="n">funcname</span><span class="p">,</span> <span class="n">robj</span> <span class="o">*</span><span class="n">body</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">sds</span> <span class="n">funcdef</span> <span class="o">=</span> <span class="n">sdsempty</span><span class="p">();</span>
+	
+	    <span class="n">funcdef</span> <span class="o">=</span> <span class="n">sdscat</span><span class="p">(</span><span class="n">funcdef</span><span class="p">,</span><span class="s2">"function "</span><span class="p">);</span>	<span class="sr">//</span><span class="n">create</span> <span class="n">lua</span> <span class="n">function</span>
+	    <span class="n">funcdef</span> <span class="o">=</span> <span class="n">sdscatlen</span><span class="p">(</span><span class="n">funcdef</span><span class="p">,</span><span class="n">funcname</span><span class="p">,</span><span class="mi">42</span><span class="p">);</span>
+	    <span class="n">funcdef</span> <span class="o">=</span> <span class="n">sdscatlen</span><span class="p">(</span><span class="n">funcdef</span><span class="p">,</span><span class="s2">"() "</span><span class="p">,</span><span class="mi">3</span><span class="p">);</span>
+	    <span class="n">funcdef</span> <span class="o">=</span> <span class="n">sdscatlen</span><span class="p">(</span><span class="n">funcdef</span><span class="p">,</span><span class="n">body</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span><span class="n">sdslen</span><span class="p">(</span><span class="n">body</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">));</span>
+	    <span class="n">funcdef</span> <span class="o">=</span> <span class="n">sdscatlen</span><span class="p">(</span><span class="n">funcdef</span><span class="p">,</span><span class="s2">"</span><span class="se">\n</span><span class="s2">end"</span><span class="p">,</span><span class="mi">4</span><span class="p">);</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">luaL_loadbuffer</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="n">funcdef</span><span class="p">,</span><span class="n">sdslen</span><span class="p">(</span><span class="n">funcdef</span><span class="p">),</span><span class="s2">"@user_script"</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="n">addReplyErrorFormat</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="s2">"Error compiling script (new function): %s</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span>
+	            <span class="n">lua_tostring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">1</span><span class="p">));</span>
+	        <span class="n">lua_pop</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+	        <span class="n">sdsfree</span><span class="p">(</span><span class="n">funcdef</span><span class="p">);</span>
+	        <span class="k">return</span> <span class="no">REDIS_ERR</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="n">sdsfree</span><span class="p">(</span><span class="n">funcdef</span><span class="p">);</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">lua_pcall</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="mi">0</span><span class="p">))</span> <span class="p">{</span>		<span class="sr">//exe</span><span class="n">cute</span> <span class="n">lua</span> <span class="n">function</span>
+	        <span class="n">addReplyErrorFormat</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="s2">"Error running script (new function): %s</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span>
+	            <span class="n">lua_tostring</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="o">-</span><span class="mi">1</span><span class="p">));</span>
+	        <span class="n">lua_pop</span><span class="p">(</span><span class="n">lua</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+	        <span class="k">return</span> <span class="no">REDIS_ERR</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* We also save a SHA1 -&gt; Original script map in a dictionary
+	     * so that we can replicate /</span> <span class="n">write</span> <span class="k">in</span> <span class="n">the</span> <span class="no">AOF</span> <span class="n">all</span> <span class="n">the</span>
+	     <span class="o">*</span> <span class="no">EVALSHA</span> <span class="n">commands</span> <span class="n">as</span> <span class="no">EVAL</span> <span class="n">using</span> <span class="n">the</span> <span class="n">original</span> <span class="n">script</span><span class="p">.</span> <span class="nf">*</span><span class="o">/</span>
+	    <span class="p">{</span>
+	        <span class="n">int</span> <span class="n">retval</span> <span class="o">=</span> <span class="n">dictAdd</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">lua_scripts</span><span class="p">,</span>
+	                             <span class="n">sdsnewlen</span><span class="p">(</span><span class="n">funcname</span><span class="o">+</span><span class="mi">2</span><span class="p">,</span><span class="mi">40</span><span class="p">),</span><span class="n">body</span><span class="p">);</span>	<span class="sr">//</span><span class="n">dict</span><span class="p">,</span> <span class="n">key</span> <span class="n">is</span> <span class="n">sha1</span><span class="p">,</span> <span class="n">value</span> <span class="n">is</span> <span class="n">script</span>
+	        <span class="n">redisAssertWithInfo</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="no">NULL</span><span class="p">,</span><span class="n">retval</span> <span class="o">==</span> <span class="no">DICT_OK</span><span class="p">);</span>
+	        <span class="n">incrRefCount</span><span class="p">(</span><span class="n">body</span><span class="p">);</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="no">REDIS_OK</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p><strong>第二步：</strong><br />
+执行脚本之前，服务器还需要做一些设置钩子和传入参数的准备工作</p>
+
+<p>a、 将EVAL命令中传入的参数和脚本参数分为保存在 KEYS 和 ARGV 数组中，并作为全局变量保存在 lua 环境中</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Populate the argv and keys table accordingly to the arguments that
+     * EVAL received. */
+    luaSetGlobalArray(lua,"KEYS",c-&gt;argv+3,numkeys); // KEYS[1]=XX, KEYS[2]=XX
+    luaSetGlobalArray(lua,"ARGV",c-&gt;argv+3+numkeys,c-&gt;argc-3-numkeys);
+</code></pre></div></div>
+
+<p>b、 为 lua 环境装载超时吃力钩子，当脚本运行时间超时时，客户端通过 SCRIPT KILL 命令可以停止脚本，也可以通过 SHUTDOWN 命令停止服务器。</p>
+
+<p>c、 执行脚本 <br />
+d、 移除钩子
+e、 将执行脚本函数得到的结果保存到客户端状态的输出缓冲去，等待服务器将结果返回给客户端</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>if (err) {
+        addReplyErrorFormat(c,"Error running script (call to %s): %s\n",
+            funcname, lua_tostring(lua,-1));
+        lua_pop(lua,2); /* Consume the Lua reply and remove error handler. */
+ } else {
+        /* On success convert the Lua return value into Redis protocol, and
+         * send it to * the client. */
+        luaReplyToRedisReply(c,lua); /* Convert and consume the reply. */
+        lua_pop(lua,1); /* Remove the error handler. */
+ }
+</code></pre></div></div>
+
+<h1 id="evalsha-命令">EVALSHA 命令</h1>
+<p>每一个被 EVAL 命令执行过的脚本，在 lua 环境中都会有一个与脚本对应的 lua 函数，函数的名字由 f_ 前缀和脚本的 SHA1 校验和组成。主要这个函数在 lua 环境中定义了，就会在 <code class="highlighter-rouge">lua_scripts</code> 中保存，那么使用 EVALSHA 命令，即使不知道脚本本身，也可以直接使用脚本的校验和来调用脚本对应的 lua 环境中的函数，这就是 EVALSHA 实现的原理</p>
+
+<h1 id="其他的脚本命令">其他的脚本命令</h1>
+<p>这里主要讲下命令的作用</p>
+
+<p><strong>SCRIPT FLUSH</strong>，用于清楚服务器中和 Lua 脚本有关的信息，这个命令会释放并重建 <code class="highlighter-rouge">lua_scripts</code> 字典，关闭现有的 lua 环境并重新创建一个新的 lua 环境 <br /></p>
+
+<p><strong>SCRIPT EXISTS</strong>，根据输入的 SHA1 校验和，检查校验和对应的脚本是否存在于服务器中。（注意：该命令允许一次传入多个 SHA1 校验和）</p>
+
+<p><strong>SCRIPT LOAD</strong>，首先在 lua 环境中为脚本创建对应的 lua 函数，然后将脚本和 SHA1 校验和保存在 <code class="highlighter-rouge">lua_scripts</code> 字典中</p>
+
+<p><strong>SCRIPT KILL</strong>，当服务器设置了参数 <code class="highlighter-rouge">lua-time-limit</code> 时，每次在执行 lua 脚本之前，都会设置一个超时钩子，脚本运行时，一旦钩子发现脚本运行时间已经超时，钩子将定期检查是否有 SCRIPT KILL 或者 SHUTDOWN 命令到达。如果超时脚本未执行任何写操作，客户端可以通过 SCRIPT KILL 命令停止脚本，并向执行脚本的客户端返回一个错误信息。处理完之后，服务器将继续执行。如果脚本已经执行过写操作，那么客户端只能通过 SHUTDOWN 命令停止服务器，防止不合法的数据写入服务器中。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* ---------------------------------------------------------------------------
+	 * SCRIPT command for script environment introspection and control
+	 * ------------------------------------------------------------------------- */</span>
+	
+	<span class="n">void</span> <span class="n">scriptCommand</span><span class="p">(</span><span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span> <span class="o">==</span> <span class="mi">2</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">strcasecmp</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span><span class="s2">"flush"</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="n">scriptingReset</span><span class="p">();</span>
+	        <span class="n">addReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">shared</span><span class="p">.</span><span class="nf">ok</span><span class="p">);</span>
+	        <span class="n">replicationScriptCacheFlush</span><span class="p">();</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">dirty</span><span class="o">++</span><span class="p">;</span> <span class="sr">/* Propagating this command is a good idea. */</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span> <span class="o">&gt;=</span> <span class="mi">2</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">strcasecmp</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span><span class="s2">"exists"</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="n">int</span> <span class="n">j</span><span class="p">;</span>
+	
+	        <span class="n">addReplyMultiBulkLen</span><span class="p">(</span><span class="n">c</span><span class="p">,</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span><span class="o">-</span><span class="mi">2</span><span class="p">);</span>
+	        <span class="k">for</span> <span class="p">(</span><span class="n">j</span> <span class="o">=</span> <span class="mi">2</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span><span class="p">;</span> <span class="n">j</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">dictFind</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">lua_scripts</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">))</span>
+	                <span class="n">addReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">shared</span><span class="p">.</span><span class="nf">cone</span><span class="p">);</span>
+	            <span class="k">else</span>
+	                <span class="n">addReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">shared</span><span class="p">.</span><span class="nf">czero</span><span class="p">);</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span> <span class="o">==</span> <span class="mi">3</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">strcasecmp</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span><span class="s2">"load"</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="n">char</span> <span class="n">funcname</span><span class="p">[</span><span class="mi">43</span><span class="p">];</span>
+	        <span class="n">sds</span> <span class="n">sha</span><span class="p">;</span>
+	
+	        <span class="n">funcname</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'f'</span><span class="p">;</span>
+	        <span class="n">funcname</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'_'</span><span class="p">;</span>
+	        <span class="n">sha1hex</span><span class="p">(</span><span class="n">funcname</span><span class="o">+</span><span class="mi">2</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span><span class="n">sdslen</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">));</span>
+	        <span class="n">sha</span> <span class="o">=</span> <span class="n">sdsnewlen</span><span class="p">(</span><span class="n">funcname</span><span class="o">+</span><span class="mi">2</span><span class="p">,</span><span class="mi">40</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">dictFind</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">lua_scripts</span><span class="p">,</span><span class="n">sha</span><span class="p">)</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">luaCreateFunction</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">server</span><span class="p">.</span><span class="nf">lua</span><span class="p">,</span><span class="n">funcname</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span>
+	                    <span class="o">==</span> <span class="no">REDIS_ERR</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">sdsfree</span><span class="p">(</span><span class="n">sha</span><span class="p">);</span>
+	                <span class="k">return</span><span class="p">;</span>
+	            <span class="p">}</span>
+	        <span class="p">}</span>
+	        <span class="n">addReplyBulkCBuffer</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">funcname</span><span class="o">+</span><span class="mi">2</span><span class="p">,</span><span class="mi">40</span><span class="p">);</span>
+	        <span class="n">sdsfree</span><span class="p">(</span><span class="n">sha</span><span class="p">);</span>
+	        <span class="n">forceCommandPropagation</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="no">REDIS_PROPAGATE_REPL</span><span class="o">|</span><span class="no">REDIS_PROPAGATE_AOF</span><span class="p">);</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span> <span class="o">==</span> <span class="mi">2</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">strcasecmp</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span><span class="s2">"kill"</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">lua_caller</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">addReplySds</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">sdsnew</span><span class="p">(</span><span class="s2">"-NOTBUSY No scripts in execution right now.</span><span class="se">\r\n</span><span class="s2">"</span><span class="p">));</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">lua_write_dirty</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">addReplySds</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">sdsnew</span><span class="p">(</span><span class="s2">"-UNKILLABLE Sorry the script already executed write commands against the dataset. You can either wait the script termination or kill the server in a hard way using the SHUTDOWN NOSAVE command.</span><span class="se">\r\n</span><span class="s2">"</span><span class="p">));</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">server</span><span class="p">.</span><span class="nf">lua_kill</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	            <span class="n">addReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">shared</span><span class="p">.</span><span class="nf">ok</span><span class="p">);</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="n">addReplyError</span><span class="p">(</span><span class="n">c</span><span class="p">,</span> <span class="s2">"Unknown SCRIPT subcommand or wrong # of args."</span><span class="p">);</span>
+	    <span class="p">}</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p><strong>参考文献：</strong> <br /></p>
+<ol>
+  <li>Redis 设计与实现，黄健宏著，机械工业出版社 <br /></li>
+  <li>redis 3.0.7 版本的源代码 <br /></li>
+  <li><a href="http://www.lua.org/manual/5.2/manual.html">lua manual 5.2</a></li>
+</ol>

@@ -1,10 +1,7 @@
-_site
-_site/CNAME
-_site/about.html
-_site/assets/css/screen.css
-_site/assets/images/profile.png
-_site/feed.xml
-_site/index.html
+_site/*
+
 .sass-cache
 .jekyll-metadata
+.jekyll-cache/*
+
 Gemfile.lock

@@ -1,0 +1,689 @@
+<p>redis replication</p>
+
+<p>在 redis 中，用户可以通过执行 SLAVEOF 或者通过设置 slaveof 选项，让一个服务器去复制另一个服务器，我们称呼这为主备复制。</p>
+
+<blockquote>
+  <p>查看__[redis主从复制]__：http://blog.wuzhenyu.com.cn/2016/12/15/how-to-build-redis-replication.html <br />
+也可以查看我在CSDN 上发的博客: http://blog.csdn.net/honglicu123/article/details/53693395</p>
+</blockquote>
+
+<p>redis2.8 以上版本的同步，有两种方式的同步，一种为完整重同步(full resychronization)，另一种是部分重同步(partial resychronization)。<code class="highlighter-rouge">PSYNC</code>具有这两种同步模式。</p>
+
+<ul>
+  <li>完整重同步用户初次同步复制的情况，通过让主服务器创建并发送RDB文件，以及向从服务器发送保存在缓冲区中的的写命令来进行同步</li>
+  <li>部分重同步，则用于处理断线后重复制的情况。当从服务器与主服务器失去连接后到重新连接主服务器时，如果条件允许，主服务器可以将主从服务器断开期间执行的写命令发送给从服务器，从服务器只需要接收并执行这些写命令，就能将数据库更新至主服务器当前的状态，保持主从服务器数据库状态一致。</li>
+</ul>
+
+<h2 id="完整重同步的步骤-full-resynchronization">完整重同步的步骤 (full resynchronization)</h2>
+<p>完整重同步，与旧版redis 中的 SYNC 命令的复制相同，步骤如下： <br />
+1) 从服务器向主服务器发送 SYNC 命令。 <br />
+2) 主服务器接收到从服务器发送的SYNC命令之后，执行 BGSAVE 命令，在后台生成一个 RDB 文件，并使用一个缓冲区保存从现在开始执行的所有写命令。 <br />
+3) 当主服务器的 BGSAVE 命令执行完毕时，主服务器会将生成的 RDB 文件发送给从服务器，从服务器接收并载入这个 RDB 文件，将自己的数据库状态更新至主服务器执行 BGSAVE 命令时的数据库状态。 <br />
+4) 主服务器将缓冲区中的所有写命令发送给从服务器，从服务器接收并执行这些写命令，将自己的数据库状态更新至主服务器当前的数据库状态。</p>
+
+<p>完整重同步，能够很好的完成初次复制和数据同步，但是当从服务器掉线时，如果仍然使用完整重同步，将造成效率低下，占用大量资源，因为这时，只需要同步从服务器掉线期间执行的写命令即可，不需要完整的将整个数据同步一遍。</p>
+
+<p><strong>缺点</strong>： <br /></p>
+<ol>
+  <li>主服务器生成 RDB 文件，会占用大量的 CPU、内存和磁盘 I/O 资源 <br /></li>
+  <li>主服务器发送 RDB 文件，会占用大量的网络资源，这可能会对主服务器相应命令请求造成影响。 <br /></li>
+  <li>从服务器接收加载 RDB 文件，载入期间，可能会因为阻塞而没办法处理命令请求。</li>
+</ol>
+
+<p>所以，<code class="highlighter-rouge">full resynchronization</code> 是一个非常耗资源的操作，redis 有必要保证只有在真正需要的时候才执行该操作。</p>
+
+<h2 id="部分重同步-partial-resynchronization">部分重同步 (partial resynchronization)</h2>
+<p>本文以从服务器发送 <code class="highlighter-rouge">slaveof</code> 命令为例说明 <code class="highlighter-rouge">PSYNC</code> 的实现。</p>
+
+<h3 id="设置主服务器的地址和端口">设置主服务器的地址和端口</h3>
+<p>当从服务器的客户端发送 <code class="highlighter-rouge">slaveof</code> 命令时，从服务器会将客户端给定的服务器的 IP 地址和端口号保存在服务器状态的 <code class="highlighter-rouge">masterhost</code> 和 <code class="highlighter-rouge">masterport</code> 属性里面：</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">struct</span> <span class="n">redisServer</span> <span class="p">{</span>
+		<span class="o">...</span>
+		<span class="sr">/* Replication (slave) */</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">masterauth</span><span class="p">;</span>               <span class="sr">/* AUTH with this password with master */</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">masterhost</span><span class="p">;</span>               <span class="sr">/* Hostname of master */</span>
+	    <span class="n">int</span> <span class="n">masterport</span><span class="p">;</span>                 <span class="sr">/* Port of master */</span>
+	    <span class="n">int</span> <span class="n">repl_timeout</span><span class="p">;</span>               <span class="sr">/* Timeout after N seconds of master idle */</span>
+	    <span class="n">redisClient</span> <span class="o">*</span><span class="n">master</span><span class="p">;</span>     <span class="sr">/* Client that is master for this slave */</span>
+	    <span class="n">redisClient</span> <span class="o">*</span><span class="n">cached_master</span><span class="p">;</span> <span class="sr">/* Cached master to be reused for PSYNC. */</span>
+	    <span class="n">int</span> <span class="n">repl_syncio_timeout</span><span class="p">;</span> <span class="sr">/* Timeout for synchronous I/</span><span class="no">O</span> <span class="n">calls</span> <span class="o">*</span><span class="sr">/
+	    int repl_state;          /</span><span class="o">*</span> <span class="no">Replication</span> <span class="n">status</span> <span class="k">if</span> <span class="n">the</span> <span class="n">instance</span> <span class="n">is</span> <span class="n">a</span> <span class="n">slave</span> <span class="o">*</span><span class="sr">/
+	    off_t repl_transfer_size; /</span><span class="o">*</span> <span class="no">Size</span> <span class="n">of</span> <span class="no">RDB</span> <span class="n">to</span> <span class="n">read</span> <span class="n">from</span> <span class="n">master</span> <span class="n">during</span> <span class="n">sync</span><span class="p">.</span> <span class="nf">*</span><span class="o">/</span>
+	    <span class="n">off_t</span> <span class="n">repl_transfer_read</span><span class="p">;</span> <span class="sr">/* Amount of RDB read from master during sync. */</span>
+	    <span class="n">off_t</span> <span class="n">repl_transfer_last_fsync_off</span><span class="p">;</span> <span class="sr">/* Offset when we fsync-ed last time. */</span>
+	    <span class="n">int</span> <span class="n">repl_transfer_s</span><span class="p">;</span>     <span class="sr">/* Slave -&gt; Master SYNC socket */</span>
+	    <span class="n">int</span> <span class="n">repl_transfer_fd</span><span class="p">;</span>    <span class="sr">/* Slave -&gt; Master SYNC temp file descriptor */</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">repl_transfer_tmpfile</span><span class="p">;</span> <span class="sr">/* Slave-&gt; master SYNC temp file name */</span>
+	    <span class="n">time_t</span> <span class="n">repl_transfer_lastio</span><span class="p">;</span> <span class="sr">/* Unix time of the latest read, for timeout */</span>
+	    <span class="n">int</span> <span class="n">repl_serve_stale_data</span><span class="p">;</span> <span class="sr">/* Serve stale data when link is down? */</span>
+	    <span class="n">int</span> <span class="n">repl_slave_ro</span><span class="p">;</span>          <span class="sr">/* Slave is read only? */</span>
+	    <span class="n">time_t</span> <span class="n">repl_down_since</span><span class="p">;</span> <span class="sr">/* Unix time at which link with master went down */</span>
+	    <span class="n">int</span> <span class="n">repl_disable_tcp_nodelay</span><span class="p">;</span>   <span class="sr">/* Disable TCP_NODELAY after SYNC? */</span>
+	    <span class="n">int</span> <span class="n">slave_priority</span><span class="p">;</span>             <span class="sr">/* Reported in INFO and used by Sentinel. */</span>
+	    <span class="n">char</span> <span class="n">repl_master_runid</span><span class="p">[</span><span class="no">REDIS_RUN_ID_SIZE</span><span class="o">+</span><span class="mi">1</span><span class="p">];</span>  <span class="sr">/* Master run id for PSYNC. */</span>
+	    <span class="n">long</span> <span class="n">long</span> <span class="n">repl_master_initial_offset</span><span class="p">;</span>         <span class="sr">/* Master PSYNC offset. */</span>
+	    <span class="sr">/* Replication script cache. */</span>
+	    <span class="n">dict</span> <span class="o">*</span><span class="n">repl_scriptcache_dict</span><span class="p">;</span>        <span class="sr">/* SHA1 all slaves are aware of. */</span>
+	    <span class="n">list</span> <span class="o">*</span><span class="n">repl_scriptcache_fifo</span><span class="p">;</span>        <span class="sr">/* First in, first out LRU eviction. */</span>
+	    <span class="n">unsigned</span> <span class="n">int</span> <span class="n">repl_scriptcache_size</span><span class="p">;</span> <span class="sr">/* Max number of elements. */</span>
+	    <span class="sr">/* Synchronous replication. */</span>
+	    <span class="n">list</span> <span class="o">*</span><span class="n">clients_waiting_acks</span><span class="p">;</span>         <span class="sr">/* Clients waiting in WAIT command. */</span>
+	    <span class="n">int</span> <span class="n">get_ack_from_slaves</span><span class="p">;</span>            <span class="sr">/* If true we send REPLCONF GETACK. */</span>
+		<span class="o">...</span>
+	<span class="p">};</span></code></pre></figure>
+
+<p>slaveof 是一个异步命令，在完成属性的设置之后，从服务器将向客户端发送 OK，实际的复制工作将从这开始。</p>
+
+<h3 id="建立套接字连接">建立套接字连接</h3>
+<p><em>SLAVEOF</em> 命令执行结束后，从服务器将根据命令所设置的 IP 地址和端口，创建连向主服务器的套接字连接。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Replication cron function, called 1 time per second. */</span>
+	<span class="n">void</span> <span class="n">replicationCron</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+		<span class="o">...</span>
+		<span class="sr">/* Check if we should connect to a MASTER */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">==</span> <span class="no">REDIS_REPL_CONNECT</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_NOTICE</span><span class="p">,</span><span class="s2">"Connecting to MASTER %s:%d"</span><span class="p">,</span>
+	            <span class="n">server</span><span class="p">.</span><span class="nf">masterhost</span><span class="p">,</span> <span class="n">server</span><span class="p">.</span><span class="nf">masterport</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">connectWithMaster</span><span class="p">()</span> <span class="o">==</span> <span class="no">REDIS_OK</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_NOTICE</span><span class="p">,</span><span class="s2">"MASTER &lt;-&gt; SLAVE sync started"</span><span class="p">);</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+		<span class="o">...</span>
+	<span class="p">}</span>
+
+	<span class="n">int</span> <span class="n">connectWithMaster</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">int</span> <span class="n">fd</span><span class="p">;</span>
+	
+		<span class="sr">//</span><span class="n">create</span> <span class="n">socket</span> <span class="n">connect</span>
+	    <span class="n">fd</span> <span class="o">=</span> <span class="n">anetTcpNonBlockBestEffortBindConnect</span><span class="p">(</span><span class="no">NULL</span><span class="p">,</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">masterhost</span><span class="p">,</span><span class="n">server</span><span class="p">.</span><span class="nf">masterport</span><span class="p">,</span><span class="no">REDIS_BIND_ADDR</span><span class="p">);</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">fd</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span><span class="s2">"Unable to connect to MASTER: %s"</span><span class="p">,</span>
+	            <span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">));</span>
+	        <span class="k">return</span> <span class="no">REDIS_ERR</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+		<span class="sr">//</span><span class="n">create</span> <span class="n">a</span> <span class="n">file</span> <span class="n">event</span> <span class="n">to</span> <span class="n">reponsible</span> <span class="k">for</span> <span class="n">replication</span> <span class="n">between</span> <span class="n">master</span> <span class="n">and</span> <span class="ss">slave:
+		</span><span class="sr">//</span><span class="err">比如接收</span> <span class="no">RDB</span> <span class="err">文件，接收主服务器传播来的写命令</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">aeCreateFileEvent</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">el</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="no">AE_READABLE</span><span class="o">|</span><span class="no">AE_WRITABLE</span><span class="p">,</span><span class="n">syncWithMaster</span><span class="p">,</span><span class="no">NULL</span><span class="p">)</span> <span class="o">==</span>
+	            <span class="no">AE_ERR</span><span class="p">)</span>
+	    <span class="p">{</span>
+	        <span class="n">close</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span><span class="s2">"Can't create readable event for SYNC"</span><span class="p">);</span>
+	        <span class="k">return</span> <span class="no">REDIS_ERR</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="n">server</span><span class="p">.</span><span class="nf">repl_transfer_lastio</span> <span class="o">=</span> <span class="n">server</span><span class="p">.</span><span class="nf">unixtime</span><span class="p">;</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">repl_transfer_s</span> <span class="o">=</span> <span class="n">fd</span><span class="p">;</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">=</span> <span class="no">REDIS_REPL_CONNECTING</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="no">REDIS_OK</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>如果从服务器创建的套接字能成功连接到主服务器，那么从服务器将会为这个套接字关联一个文件事件处理器(syncWithMaster)，负责执行后续的复制工作，如接收 RDB 文件，接收服务器传播来的写命令等。</p>
+
+<h3 id="发送-ping-命令">发送 PING 命令</h3>
+<p>从服务器成为主服务器的客户端之后，第一件事就是向主服务器发送 PING 命令。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">void</span> <span class="n">replicationCron</span> <span class="p">(</span><span class="n">void</span><span class="p">)</span>
+	<span class="p">{</span>
+		<span class="o">...</span>
+		<span class="sr">/* If we have attached slaves, PING them from time to time.
+	     * So slaves can implement an explicit timeout to masters, and will
+	     * be able to detect a link disconnection even if the TCP connection
+	     * will not actually go down. */</span>
+	    <span class="n">listIter</span> <span class="n">li</span><span class="p">;</span>
+	    <span class="n">listNode</span> <span class="o">*</span><span class="n">ln</span><span class="p">;</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">ping_argv</span><span class="p">[</span><span class="mi">1</span><span class="p">];</span>
+	
+	    <span class="sr">/* First, send PING according to ping_slave_period. */</span>
+	    <span class="k">if</span> <span class="p">((</span><span class="n">replication_cron_loops</span> <span class="o">%</span> <span class="n">server</span><span class="p">.</span><span class="nf">repl_ping_slave_period</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">ping_argv</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">createStringObject</span><span class="p">(</span><span class="s2">"PING"</span><span class="p">,</span><span class="mi">4</span><span class="p">);</span>
+	        <span class="n">replicationFeedSlaves</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">slaves</span><span class="p">,</span> <span class="n">server</span><span class="p">.</span><span class="nf">slaveseldb</span><span class="p">,</span>
+	            <span class="n">ping_argv</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+	        <span class="n">decrRefCount</span><span class="p">(</span><span class="n">ping_argv</span><span class="p">[</span><span class="mi">0</span><span class="p">]);</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Second, send a newline to all the slaves in pre-synchronization
+	     * stage, that is, slaves waiting for the master to create the RDB file.
+	     * The newline will be ignored by the slave but will refresh the
+	     * last-io timer preventing a timeout. In this case we ignore the
+	     * ping period and refresh the connection once per second since certain
+	     * timeouts are set at a few seconds (example: PSYNC response). */</span>
+	    <span class="n">listRewind</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">slaves</span><span class="p">,</span><span class="o">&amp;</span><span class="n">li</span><span class="p">);</span>
+	    <span class="k">while</span><span class="p">((</span><span class="n">ln</span> <span class="o">=</span> <span class="n">listNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">li</span><span class="p">)))</span> <span class="p">{</span>
+	        <span class="n">redisClient</span> <span class="o">*</span><span class="n">slave</span> <span class="o">=</span> <span class="n">ln</span><span class="o">-&gt;</span><span class="n">value</span><span class="p">;</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="n">slave</span><span class="o">-&gt;</span><span class="n">replstate</span> <span class="o">==</span> <span class="no">REDIS_REPL_WAIT_BGSAVE_START</span> <span class="o">||</span>
+	            <span class="p">(</span><span class="n">slave</span><span class="o">-&gt;</span><span class="n">replstate</span> <span class="o">==</span> <span class="no">REDIS_REPL_WAIT_BGSAVE_END</span> <span class="o">&amp;&amp;</span>
+	             <span class="n">server</span><span class="p">.</span><span class="nf">rdb_child_type</span> <span class="o">!=</span> <span class="no">REDIS_RDB_CHILD_TYPE_SOCKET</span><span class="p">))</span>
+	        <span class="p">{</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">write</span><span class="p">(</span><span class="n">slave</span><span class="o">-&gt;</span><span class="n">fd</span><span class="p">,</span> <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="sr">/* Don't worry, it's just a ping. */</span>
+	            <span class="p">}</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Disconnect timedout slaves. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">listLength</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">slaves</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="n">listIter</span> <span class="n">li</span><span class="p">;</span>
+	        <span class="n">listNode</span> <span class="o">*</span><span class="n">ln</span><span class="p">;</span>
+	
+	        <span class="n">listRewind</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">slaves</span><span class="p">,</span><span class="o">&amp;</span><span class="n">li</span><span class="p">);</span>
+	        <span class="k">while</span><span class="p">((</span><span class="n">ln</span> <span class="o">=</span> <span class="n">listNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">li</span><span class="p">)))</span> <span class="p">{</span>
+	            <span class="n">redisClient</span> <span class="o">*</span><span class="n">slave</span> <span class="o">=</span> <span class="n">ln</span><span class="o">-&gt;</span><span class="n">value</span><span class="p">;</span>
+	
+	            <span class="k">if</span> <span class="p">(</span><span class="n">slave</span><span class="o">-&gt;</span><span class="n">replstate</span> <span class="o">!=</span> <span class="no">REDIS_REPL_ONLINE</span><span class="p">)</span> <span class="n">continue</span><span class="p">;</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">slave</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_PRE_PSYNC</span><span class="p">)</span> <span class="n">continue</span><span class="p">;</span>
+	            <span class="k">if</span> <span class="p">((</span><span class="n">server</span><span class="p">.</span><span class="nf">unixtime</span> <span class="o">-</span> <span class="n">slave</span><span class="o">-&gt;</span><span class="n">repl_ack_time</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">server</span><span class="p">.</span><span class="nf">repl_timeout</span><span class="p">)</span>
+	            <span class="p">{</span>
+	                <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span> <span class="s2">"Disconnecting timedout slave: %s"</span><span class="p">,</span>
+	                    <span class="n">replicationGetSlaveName</span><span class="p">(</span><span class="n">slave</span><span class="p">));</span>
+	                <span class="n">freeClient</span><span class="p">(</span><span class="n">slave</span><span class="p">);</span>
+	            <span class="p">}</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+		<span class="o">...</span>
+	<span class="p">}</span>
+
+	<span class="n">void</span> <span class="n">syncWithMaster</span><span class="p">(</span><span class="n">aeEventLoop</span> <span class="o">*</span><span class="n">el</span><span class="p">,</span> <span class="n">int</span> <span class="n">fd</span><span class="p">,</span> <span class="n">void</span> <span class="o">*</span><span class="n">privdata</span><span class="p">,</span> <span class="n">int</span> <span class="n">mask</span><span class="p">)</span> <span class="p">{</span>
+		<span class="o">...</span>
+		<span class="sr">/* Send a PING to check the master is able to reply without errors. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">==</span> <span class="no">REDIS_REPL_CONNECTING</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_NOTICE</span><span class="p">,</span><span class="s2">"Non blocking connect for SYNC fired the event."</span><span class="p">);</span>
+	        <span class="sr">/* Delete the writable event so that the readable event remains
+	         * registered and we can wait for the PONG reply. */</span>
+	        <span class="n">aeDeleteFileEvent</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">el</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="no">AE_WRITABLE</span><span class="p">);</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">=</span> <span class="no">REDIS_REPL_RECEIVE_PONG</span><span class="p">;</span>
+	        <span class="sr">/* Send the PING, don't check for errors at all, we have the timeout
+	         * that will take care about this. */</span>
+	        <span class="n">err</span> <span class="o">=</span> <span class="n">sendSynchronousCommand</span><span class="p">(</span><span class="no">SYNC_CMD_WRITE</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="s2">"PING"</span><span class="p">,</span><span class="no">NULL</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">err</span><span class="p">)</span> <span class="n">goto</span> <span class="n">write_error</span><span class="p">;</span>
+	        <span class="k">return</span><span class="p">;</span>
+	    <span class="p">}</span>
+		<span class="o">...</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>PING命令的作用: <br /></p>
+
+<ul>
+  <li>检查套接字的读写状态是否正常</li>
+  <li>检查主服务器能否正常处理命令请求</li>
+</ul>
+
+<p>如果从服务器读取到 “PONG” 回复，说明主从之间网络状态正常，能够进行后续的复制工作，从服务器可以继续执行复制操作的下一个步骤。其他异常情况下，从服务器将断开主服务器的连接，并重新创建连向主服务器的套接字。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Receive the PONG command. */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">==</span> <span class="no">REDIS_REPL_RECEIVE_PONG</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">err</span> <span class="o">=</span> <span class="n">sendSynchronousCommand</span><span class="p">(</span><span class="no">SYNC_CMD_READ</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="no">NULL</span><span class="p">);</span>
+
+        <span class="sr">/* We accept only two replies as valid, a positive +PONG reply
+         * (we just check for "+") or an authentication error.
+         * Note that older versions of Redis replied with "operation not
+         * permitted" instead of using a proper error code, so we test
+         * both. */</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">err</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">!=</span> <span class="s1">'+'</span> <span class="o">&amp;&amp;</span>
+            <span class="n">strncmp</span><span class="p">(</span><span class="n">err</span><span class="p">,</span><span class="s2">"-NOAUTH"</span><span class="p">,</span><span class="mi">7</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span>
+            <span class="n">strncmp</span><span class="p">(</span><span class="n">err</span><span class="p">,</span><span class="s2">"-ERR operation not permitted"</span><span class="p">,</span><span class="mi">28</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span><span class="s2">"Error reply to PING from master: '%s'"</span><span class="p">,</span><span class="n">err</span><span class="p">);</span>
+            <span class="n">sdsfree</span><span class="p">(</span><span class="n">err</span><span class="p">);</span>
+            <span class="n">goto</span> <span class="n">error</span><span class="p">;</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_NOTICE</span><span class="p">,</span>
+                <span class="s2">"Master replied to PING, replication can continue..."</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="n">sdsfree</span><span class="p">(</span><span class="n">err</span><span class="p">);</span>
+        <span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">=</span> <span class="no">REDIS_REPL_SEND_AUTH</span><span class="p">;</span>
+    <span class="p">}</span></code></pre></figure>
+
+<h3 id="身份验证">身份验证</h3>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* AUTH with the master if required. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">==</span> <span class="no">REDIS_REPL_SEND_AUTH</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">masterauth</span><span class="p">)</span> <span class="p">{</span>	<span class="sr">//</span> <span class="s2">"AUTH server.masterauth"</span>
+	            <span class="n">err</span> <span class="o">=</span> <span class="n">sendSynchronousCommand</span><span class="p">(</span><span class="no">SYNC_CMD_WRITE</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="s2">"AUTH"</span><span class="p">,</span><span class="n">server</span><span class="p">.</span><span class="nf">masterauth</span><span class="p">,</span><span class="no">NULL</span><span class="p">);</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">err</span><span class="p">)</span> <span class="n">goto</span> <span class="n">write_error</span><span class="p">;</span>
+	            <span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">=</span> <span class="no">REDIS_REPL_RECEIVE_AUTH</span><span class="p">;</span>
+	            <span class="k">return</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">=</span> <span class="no">REDIS_REPL_SEND_PORT</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Receive AUTH reply. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">==</span> <span class="no">REDIS_REPL_RECEIVE_AUTH</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">err</span> <span class="o">=</span> <span class="n">sendSynchronousCommand</span><span class="p">(</span><span class="no">SYNC_CMD_READ</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="no">NULL</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">err</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'-'</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span><span class="s2">"Unable to AUTH to MASTER: %s"</span><span class="p">,</span><span class="n">err</span><span class="p">);</span>
+	            <span class="n">sdsfree</span><span class="p">(</span><span class="n">err</span><span class="p">);</span>
+	            <span class="n">goto</span> <span class="n">error</span><span class="p">;</span>
+	        <span class="p">}</span>
+	        <span class="n">sdsfree</span><span class="p">(</span><span class="n">err</span><span class="p">);</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">=</span> <span class="no">REDIS_REPL_SEND_PORT</span><span class="p">;</span>
+	    <span class="p">}</span></code></pre></figure>
+
+<p>从服务器设置了 masterauth 选项，将进行身份验证，否则，不会进行身份验证。但是会出现以下几种情况： <br /></p>
+
+<ul>
+  <li>主服务器没设置 requirepass 选项，从服务器没有设置 masterauth，主服务能够继续执行从服务器发送的命令请求，复制工作可以继续进行。</li>
+  <li>如果从服务器发送的验证密码与主服务器相同，能够继续进行复制工作；否则，主服务器将返回一个 <code class="highlighter-rouge">invalid password</code> 的错误</li>
+  <li>主服务器设置了 requirepass 选项，从服务器没有设置 masterauth 选项，那么主服务器将返回一个 <code class="highlighter-rouge">NOAUTH</code> 的错误；相反，如果主服务器没有设置 requirepass，而从服务器缺设置了 masterauth，那么主服务器将返回一个 <code class="highlighter-rouge">no password is set</code> 的错误信息。</li>
+</ul>
+
+<h3 id="发送端口信息">发送端口信息</h3>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">		<span class="sr">/* Set the slave port, so that Master's INFO command can list the
+	     * slave listening port correctly. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">==</span> <span class="no">REDIS_REPL_SEND_PORT</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">sds</span> <span class="n">port</span> <span class="o">=</span> <span class="n">sdsfromlonglong</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">port</span><span class="p">);</span>
+	        <span class="n">err</span> <span class="o">=</span> <span class="n">sendSynchronousCommand</span><span class="p">(</span><span class="no">SYNC_CMD_WRITE</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="s2">"REPLCONF"</span><span class="p">,</span>
+	                <span class="s2">"listening-port"</span><span class="p">,</span><span class="n">port</span><span class="p">,</span> <span class="no">NULL</span><span class="p">);</span>	<span class="sr">//</span> <span class="s2">"REPLCONF listening-port 6379"</span>
+	        <span class="n">sdsfree</span><span class="p">(</span><span class="n">port</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">err</span><span class="p">)</span> <span class="n">goto</span> <span class="n">write_error</span><span class="p">;</span>
+	        <span class="n">sdsfree</span><span class="p">(</span><span class="n">err</span><span class="p">);</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">=</span> <span class="no">REDIS_REPL_RECEIVE_PORT</span><span class="p">;</span>
+	        <span class="k">return</span><span class="p">;</span>
+	    <span class="p">}</span></code></pre></figure>
+
+<p>从服务器发送 <code class="highlighter-rouge">REPLCONF listening-port &lt;port&gt;</code> ，向主服务器发送从服务器的监听端口号。主服务器接收后，会将端口号记录在从服务器对应的客户端状态结构体中的 <code class="highlighter-rouge">slave_listening_port</code> 属性中，在客户端执行 <code class="highlighter-rouge">INFO REPLICATION</code> 命令查看到的 port 参数的值就是这个属性的值。</p>
+
+<h3 id="同步">同步</h3>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">		<span class="sr">/* Try a partial resynchonization. If we don't have a cached master
+	     * slaveTryPartialResynchronization() will at least try to use PSYNC
+	     * to start a full resynchronization so that we get the master run id
+	     * and the global offset, to try a partial resync at the next
+	     * reconnection attempt. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">==</span> <span class="no">REDIS_REPL_SEND_PSYNC</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">slaveTryPartialResynchronization</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="mi">0</span><span class="p">)</span> <span class="o">==</span> <span class="no">PSYNC_WRITE_ERROR</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">err</span> <span class="o">=</span> <span class="n">sdsnew</span><span class="p">(</span><span class="s2">"Write error sending the PSYNC command."</span><span class="p">);</span>
+	            <span class="n">goto</span> <span class="n">write_error</span><span class="p">;</span>
+	        <span class="p">}</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">=</span> <span class="no">REDIS_REPL_RECEIVE_PSYNC</span><span class="p">;</span>
+	        <span class="k">return</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* If reached this point, we should be in REDIS_REPL_RECEIVE_PSYNC. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span> <span class="o">!=</span> <span class="no">REDIS_REPL_RECEIVE_PSYNC</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span><span class="s2">"syncWithMaster(): state machine error, "</span>
+	                             <span class="s2">"state should be RECEIVE_PSYNC but is %d"</span><span class="p">,</span>
+	                             <span class="n">server</span><span class="p">.</span><span class="nf">repl_state</span><span class="p">);</span>
+	        <span class="n">goto</span> <span class="n">error</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="n">psync_result</span> <span class="o">=</span> <span class="n">slaveTryPartialResynchronization</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">psync_result</span> <span class="o">==</span> <span class="no">PSYNC_WAIT_REPLY</span><span class="p">)</span> <span class="k">return</span><span class="p">;</span> <span class="sr">/* Try again later... */</span>
+	
+	    <span class="sr">/* Note: if PSYNC does not return WAIT_REPLY, it will take care of
+	     * uninstalling the read handler from the file descriptor. */</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">psync_result</span> <span class="o">==</span> <span class="no">PSYNC_CONTINUE</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_NOTICE</span><span class="p">,</span> <span class="s2">"MASTER &lt;-&gt; SLAVE sync: Master accepted a Partial Resynchronization."</span><span class="p">);</span>
+	        <span class="k">return</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* PSYNC failed or is not supported: we want our slaves to resync with us
+	     * as well, if we have any (chained replication case). The mater may
+	     * transfer us an entirely different data set and we have no way to
+	     * incrementally feed our slaves after that. */</span>
+	    <span class="n">disconnectSlaves</span><span class="p">();</span> <span class="sr">/* Force our slaves to resync with us as well. */</span>
+	    <span class="n">freeReplicationBacklog</span><span class="p">();</span> <span class="sr">/* Don't allow our chained slaves to PSYNC. */</span>
+	
+	    <span class="sr">/* Fall back to SYNC if needed. Otherwise psync_result == PSYNC_FULLRESYNC
+	     * and the server.repl_master_runid and repl_master_initial_offset are
+	     * already populated. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">psync_result</span> <span class="o">==</span> <span class="no">PSYNC_NOT_SUPPORTED</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_NOTICE</span><span class="p">,</span><span class="s2">"Retrying with SYNC..."</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">syncWrite</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="s2">"SYNC</span><span class="se">\r\n</span><span class="s2">"</span><span class="p">,</span><span class="mi">6</span><span class="p">,</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_syncio_timeout</span><span class="o">*</span><span class="mi">1000</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span><span class="s2">"I/O error writing to MASTER: %s"</span><span class="p">,</span>
+	                <span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">));</span>
+	            <span class="n">goto</span> <span class="n">error</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Prepare a suitable temp file for bulk transfer */</span>
+	    <span class="k">while</span><span class="p">(</span><span class="n">maxtries</span><span class="o">--</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">snprintf</span><span class="p">(</span><span class="n">tmpfile</span><span class="p">,</span><span class="mi">256</span><span class="p">,</span>
+	            <span class="s2">"temp-%d.%ld.rdb"</span><span class="p">,(</span><span class="n">int</span><span class="p">)</span><span class="n">server</span><span class="p">.</span><span class="nf">unixtime</span><span class="p">,(</span><span class="n">long</span> <span class="n">int</span><span class="p">)</span><span class="n">getpid</span><span class="p">());</span>
+	        <span class="n">dfd</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="n">tmpfile</span><span class="p">,</span><span class="no">O_CREAT</span><span class="o">|</span><span class="no">O_WRONLY</span><span class="o">|</span><span class="no">O_EXCL</span><span class="p">,</span><span class="mo">0644</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">dfd</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span>
+	        <span class="nb">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+	    <span class="p">}</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">dfd</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span><span class="s2">"Opening the temp file needed for MASTER &lt;-&gt; SLAVE synchronization: %s"</span><span class="p">,</span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">));</span>
+	        <span class="n">goto</span> <span class="n">error</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Setup the non blocking download of the bulk file. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">aeCreateFileEvent</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">el</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span> <span class="no">AE_READABLE</span><span class="p">,</span><span class="n">readSyncBulkPayload</span><span class="p">,</span><span class="no">NULL</span><span class="p">)</span>
+	            <span class="o">==</span> <span class="no">AE_ERR</span><span class="p">)</span>
+	    <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span>
+	            <span class="s2">"Can't create readable event for SYNC: %s (fd=%d)"</span><span class="p">,</span>
+	            <span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">),</span><span class="n">fd</span><span class="p">);</span>
+	        <span class="n">goto</span> <span class="n">error</span><span class="p">;</span>
+	    <span class="p">}</span></code></pre></figure>
+
+<p>按照上文代码中的注释，如果是初次复制，<code class="highlighter-rouge">we don't have a cached master</code>，采用的是 <code class="highlighter-rouge">full resynchronization</code>，获取 <code class="highlighter-rouge">master run id and the global offset</code>。如果是断线重连复制，使用的部分重复制 <code class="highlighter-rouge">partial resynchronization</code>。使用 <code class="highlighter-rouge">full resynchronization</code> 时，接收主服务器发送的 RDB 文件。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="c1">#define PSYNC_WRITE_ERROR 0</span>
+	<span class="c1">#define PSYNC_WAIT_REPLY 1</span>
+	<span class="c1">#define PSYNC_CONTINUE 2</span>
+	<span class="c1">#define PSYNC_FULLRESYNC 3</span>
+	<span class="c1">#define PSYNC_NOT_SUPPORTED 4</span>
+	<span class="n">int</span> <span class="n">slaveTryPartialResynchronization</span><span class="p">(</span><span class="n">int</span> <span class="n">fd</span><span class="p">,</span> <span class="n">int</span> <span class="n">read_reply</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">psync_runid</span><span class="p">;</span>
+	    <span class="n">char</span> <span class="n">psync_offset</span><span class="p">[</span><span class="mi">32</span><span class="p">];</span>
+	    <span class="n">sds</span> <span class="n">reply</span><span class="p">;</span>
+	
+	    <span class="sr">/* Writing half */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">read_reply</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="sr">/* Initially set repl_master_initial_offset to -1 to mark the current
+	         * master run_id and offset as not valid. Later if we'll be able to do
+	         * a FULL resync using the PSYNC command we'll set the offset at the
+	         * right value, so that this information will be propagated to the
+	         * client structure representing the master into server.master. */</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">repl_master_initial_offset</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">cached_master</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">psync_runid</span> <span class="o">=</span> <span class="n">server</span><span class="p">.</span><span class="nf">cached_master</span><span class="o">-&gt;</span><span class="n">replrunid</span><span class="p">;</span>
+	            <span class="n">snprintf</span><span class="p">(</span><span class="n">psync_offset</span><span class="p">,</span><span class="n">sizeof</span><span class="p">(</span><span class="n">psync_offset</span><span class="p">),</span><span class="s2">"%lld"</span><span class="p">,</span> <span class="n">server</span><span class="p">.</span><span class="nf">cached_master</span><span class="o">-&gt;</span><span class="n">reploff</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>
+	            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_NOTICE</span><span class="p">,</span><span class="s2">"Trying a partial resynchronization (request %s:%s)."</span><span class="p">,</span> <span class="n">psync_runid</span><span class="p">,</span> <span class="n">psync_offset</span><span class="p">);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_NOTICE</span><span class="p">,</span><span class="s2">"Partial resynchronization not possible (no cached master)"</span><span class="p">);</span>
+	            <span class="n">psync_runid</span> <span class="o">=</span> <span class="s2">"?"</span><span class="p">;</span>
+	            <span class="n">memcpy</span><span class="p">(</span><span class="n">psync_offset</span><span class="p">,</span><span class="s2">"-1"</span><span class="p">,</span><span class="mi">3</span><span class="p">);</span>
+	        <span class="p">}</span>
+	
+	        <span class="sr">/* Issue the PSYNC command */</span>
+			<span class="sr">/* PSYNC ? -1 */</span>
+	        <span class="n">reply</span> <span class="o">=</span> <span class="n">sendSynchronousCommand</span><span class="p">(</span><span class="no">SYNC_CMD_WRITE</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="s2">"PSYNC"</span><span class="p">,</span><span class="n">psync_runid</span><span class="p">,</span><span class="n">psync_offset</span><span class="p">,</span><span class="no">NULL</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">reply</span> <span class="o">!=</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span><span class="s2">"Unable to send PSYNC to master: %s"</span><span class="p">,</span><span class="n">reply</span><span class="p">);</span>
+	            <span class="n">sdsfree</span><span class="p">(</span><span class="n">reply</span><span class="p">);</span>
+	            <span class="n">aeDeleteFileEvent</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">el</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="no">AE_READABLE</span><span class="p">);</span>
+	            <span class="k">return</span> <span class="no">PSYNC_WRITE_ERROR</span><span class="p">;</span>
+	        <span class="p">}</span>
+	        <span class="k">return</span> <span class="no">PSYNC_WAIT_REPLY</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Reading half */</span>
+	    <span class="n">reply</span> <span class="o">=</span> <span class="n">sendSynchronousCommand</span><span class="p">(</span><span class="no">SYNC_CMD_READ</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="no">NULL</span><span class="p">);</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">sdslen</span><span class="p">(</span><span class="n">reply</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="sr">/* The master may send empty newlines after it receives PSYNC
+	         * and before to reply, just to keep the connection alive. */</span>
+	        <span class="n">sdsfree</span><span class="p">(</span><span class="n">reply</span><span class="p">);</span>
+	        <span class="k">return</span> <span class="no">PSYNC_WAIT_REPLY</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="n">aeDeleteFileEvent</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">el</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="no">AE_READABLE</span><span class="p">);</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strncmp</span><span class="p">(</span><span class="n">reply</span><span class="p">,</span><span class="s2">"+FULLRESYNC"</span><span class="p">,</span><span class="mi">11</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="n">char</span> <span class="o">*</span><span class="n">runid</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">,</span> <span class="o">*</span><span class="n">offset</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	
+	        <span class="sr">/* FULL RESYNC, parse the reply in order to extract the run id
+	         * and the replication offset. */</span>
+	        <span class="n">runid</span> <span class="o">=</span> <span class="n">strchr</span><span class="p">(</span><span class="n">reply</span><span class="p">,</span><span class="s1">' '</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">runid</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">runid</span><span class="o">++</span><span class="p">;</span>
+	            <span class="n">offset</span> <span class="o">=</span> <span class="n">strchr</span><span class="p">(</span><span class="n">runid</span><span class="p">,</span><span class="s1">' '</span><span class="p">);</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">offset</span><span class="p">)</span> <span class="n">offset</span><span class="o">++</span><span class="p">;</span>
+	        <span class="p">}</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">runid</span> <span class="o">||</span> <span class="o">!</span><span class="n">offset</span> <span class="o">||</span> <span class="p">(</span><span class="n">offset</span><span class="o">-</span><span class="n">runid</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">!=</span> <span class="no">REDIS_RUN_ID_SIZE</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span>
+	                <span class="s2">"Master replied with wrong +FULLRESYNC syntax."</span><span class="p">);</span>
+	            <span class="sr">/* This is an unexpected condition, actually the +FULLRESYNC
+	             * reply means that the master supports PSYNC, but the reply
+	             * format seems wrong. To stay safe we blank the master
+	             * runid to make sure next PSYNCs will fail. */</span>
+	            <span class="n">memset</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_master_runid</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="no">REDIS_RUN_ID_SIZE</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">memcpy</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_master_runid</span><span class="p">,</span> <span class="n">runid</span><span class="p">,</span> <span class="n">offset</span><span class="o">-</span><span class="n">runid</span><span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+	            <span class="n">server</span><span class="p">.</span><span class="nf">repl_master_runid</span><span class="p">[</span><span class="no">REDIS_RUN_ID_SIZE</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'\0'</span><span class="p">;</span>
+	            <span class="n">server</span><span class="p">.</span><span class="nf">repl_master_initial_offset</span> <span class="o">=</span> <span class="n">strtoll</span><span class="p">(</span><span class="n">offset</span><span class="p">,</span><span class="no">NULL</span><span class="p">,</span><span class="mi">10</span><span class="p">);</span>
+	            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_NOTICE</span><span class="p">,</span><span class="s2">"Full resync from master: %s:%lld"</span><span class="p">,</span>
+	                <span class="n">server</span><span class="p">.</span><span class="nf">repl_master_runid</span><span class="p">,</span>
+	                <span class="n">server</span><span class="p">.</span><span class="nf">repl_master_initial_offset</span><span class="p">);</span>
+	        <span class="p">}</span>
+	        <span class="sr">/* We are going to full resync, discard the cached master structure. */</span>
+	        <span class="n">replicationDiscardCachedMaster</span><span class="p">();</span>
+	        <span class="n">sdsfree</span><span class="p">(</span><span class="n">reply</span><span class="p">);</span>
+	        <span class="k">return</span> <span class="no">PSYNC_FULLRESYNC</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strncmp</span><span class="p">(</span><span class="n">reply</span><span class="p">,</span><span class="s2">"+CONTINUE"</span><span class="p">,</span><span class="mi">9</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="sr">/* Partial resync was accepted, set the replication state accordingly */</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_NOTICE</span><span class="p">,</span>
+	            <span class="s2">"Successful partial resynchronization with master."</span><span class="p">);</span>
+	        <span class="n">sdsfree</span><span class="p">(</span><span class="n">reply</span><span class="p">);</span>
+	        <span class="n">replicationResurrectCachedMaster</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span>
+	        <span class="k">return</span> <span class="no">PSYNC_CONTINUE</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* If we reach this point we received either an error since the master does
+	     * not understand PSYNC, or an unexpected reply from the master.
+	     * Return PSYNC_NOT_SUPPORTED to the caller in both cases. */</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">strncmp</span><span class="p">(</span><span class="n">reply</span><span class="p">,</span><span class="s2">"-ERR"</span><span class="p">,</span><span class="mi">4</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="sr">/* If it's not an error, log the unexpected event. */</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span>
+	            <span class="s2">"Unexpected reply to PSYNC from master: %s"</span><span class="p">,</span> <span class="n">reply</span><span class="p">);</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_NOTICE</span><span class="p">,</span>
+	            <span class="s2">"Master does not support PSYNC or is in "</span>
+	            <span class="s2">"error state (reply: %s)"</span><span class="p">,</span> <span class="n">reply</span><span class="p">);</span>
+	    <span class="p">}</span>
+	    <span class="n">sdsfree</span><span class="p">(</span><span class="n">reply</span><span class="p">);</span>
+	    <span class="n">replicationDiscardCachedMaster</span><span class="p">();</span>
+	    <span class="k">return</span> <span class="no">PSYNC_NOT_SUPPORTED</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>slaveTryPartialResynchronization 函数描述了主服务器接收到 <code class="highlighter-rouge">PSYNC</code> 命令时，返回给从服务器的几种情况。 如果从服务器与主服务器是初次复制，或者之前执行过 <code class="highlighter-rouge">slaveof no one</code> 命令，那么从服务器将向主服务器发送 <code class="highlighter-rouge">PSYNC ? -1</code> 命令，请求进行__完整重复制__；否则，从服务器向主服务器发送 <code class="highlighter-rouge">PSYNC &lt;runid&gt; &lt;offset&gt;</code> 命令，请求进行__部分重同步__。</p>
+
+<ul>
+  <li>如果主服务器返回 <code class="highlighter-rouge">+FULLRESYNC &lt;runid&gt; &lt;offset&gt;</code> 回复，表示主从将执行完整重同步。 runid 为主服务的 runid，从服务器保存这个值，用于下次发送 PSYNC 命令时使用，offset 是主服务器当前的复制偏移量，从服务器会将这个值作为自己的初始化偏移值。</li>
+  <li>如果主服务器返回 <code class="highlighter-rouge">+CONTINUE</code> ，进行部分重同步</li>
+  <li>返回 <code class="highlighter-rouge">-ERR</code>，表示主服务器版本低于 2.8，不能识别 <code class="highlighter-rouge">PSYNC</code> 命令，使用 <code class="highlighter-rouge">SYNC</code> 进行完整重同步操作。
+    <h3 id="命令传播">命令传播</h3>
+    <p>当完成同步之后，主从服务器就会进入命令传播阶段。这时，主服务器只要一直将自己执行的写命令发送给从服务器，从服务器只需要一直接收和执行主服务器发送过来的写命令，就可以保证主从服务器数据库状态一致了。</p>
+  </li>
+</ul>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">void</span> <span class="n">syncCommand</span> <span class="p">(</span><span class="n">redisClient</span><span class="o">*</span> <span class="n">c</span><span class="p">)</span>
+	<span class="p">{</span>
+		<span class="o">...</span>
+		<span class="sr">/* Try a partial resynchronization if this is a PSYNC command.
+	     * If it fails, we continue with usual full resynchronization, however
+	     * when this happens masterTryPartialResynchronization() already
+	     * replied with:
+	     *
+	     * +FULLRESYNC &lt;runid&gt; &lt;offset&gt;
+	     *
+	     * So the slave knows the new runid and offset to try a PSYNC later
+	     * if the connection with the master is lost. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcasecmp</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span><span class="s2">"psync"</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">masterTryPartialResynchronization</span><span class="p">(</span><span class="n">c</span><span class="p">)</span> <span class="o">==</span> <span class="no">REDIS_OK</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">server</span><span class="p">.</span><span class="nf">stat_sync_partial_ok</span><span class="o">++</span><span class="p">;</span>
+	            <span class="k">return</span><span class="p">;</span> <span class="sr">/* No full resync needed, return. */</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">char</span> <span class="o">*</span><span class="n">master_runid</span> <span class="o">=</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">;</span>
+	
+	            <span class="sr">/* Increment stats for failed PSYNCs, but only if the
+	             * runid is not "?", as this is used by slaves to force a full
+	             * resync on purpose when they are not albe to partially
+	             * resync. */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">master_runid</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">!=</span> <span class="s1">'?'</span><span class="p">)</span> <span class="n">server</span><span class="p">.</span><span class="nf">stat_sync_partial_err</span><span class="o">++</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="sr">/* If a slave uses SYNC, we are dealing with an old implementation
+	         * of the replication protocol (like redis-cli --slave). Flag the client
+	         * so that we don't expect to receive REPLCONF ACK feedbacks. */</span>
+	        <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_PRE_PSYNC</span><span class="p">;</span>
+	    <span class="p">}</span>
+		<span class="o">...</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>复制积压缓冲区，就是一个循环数组，可以看成是一个队列，通过先进先出的方式，如果数组满了，会将最开始的那部分覆盖。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Feed the slave 'c' with the replication backlog starting from the
+	 * specified 'offset' up to the end of the backlog. */</span>
+	<span class="n">long</span> <span class="n">long</span> <span class="n">addReplyReplicationBacklog</span><span class="p">(</span><span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span><span class="p">,</span> <span class="n">long</span> <span class="n">long</span> <span class="n">offset</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">long</span> <span class="n">long</span> <span class="n">j</span><span class="p">,</span> <span class="n">skip</span><span class="p">,</span> <span class="n">len</span><span class="p">;</span>
+	
+	    <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_DEBUG</span><span class="p">,</span> <span class="s2">"[PSYNC] Slave request offset: %lld"</span><span class="p">,</span> <span class="n">offset</span><span class="p">);</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_histlen</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_DEBUG</span><span class="p">,</span> <span class="s2">"[PSYNC] Backlog history len is zero"</span><span class="p">);</span>
+	        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_DEBUG</span><span class="p">,</span> <span class="s2">"[PSYNC] Backlog size: %lld"</span><span class="p">,</span>
+	             <span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_size</span><span class="p">);</span>
+	    <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_DEBUG</span><span class="p">,</span> <span class="s2">"[PSYNC] First byte: %lld"</span><span class="p">,</span>
+	             <span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_off</span><span class="p">);</span>
+	    <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_DEBUG</span><span class="p">,</span> <span class="s2">"[PSYNC] History len: %lld"</span><span class="p">,</span>
+	             <span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_histlen</span><span class="p">);</span>
+	    <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_DEBUG</span><span class="p">,</span> <span class="s2">"[PSYNC] Current index: %lld"</span><span class="p">,</span>
+	             <span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_idx</span><span class="p">);</span>
+	
+	    <span class="sr">/* Compute the amount of bytes we need to discard. */</span>
+	    <span class="n">skip</span> <span class="o">=</span> <span class="n">offset</span> <span class="o">-</span> <span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_off</span><span class="p">;</span>
+	    <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_DEBUG</span><span class="p">,</span> <span class="s2">"[PSYNC] Skipping: %lld"</span><span class="p">,</span> <span class="n">skip</span><span class="p">);</span>
+	
+	    <span class="sr">/* Point j to the oldest byte, that is actaully our
+	     * server.repl_backlog_off byte. */</span>
+	    <span class="n">j</span> <span class="o">=</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_idx</span> <span class="o">+</span>
+	        <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_size</span><span class="o">-</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_histlen</span><span class="p">))</span> <span class="o">%</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_size</span><span class="p">;</span>
+	    <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_DEBUG</span><span class="p">,</span> <span class="s2">"[PSYNC] Index of first byte: %lld"</span><span class="p">,</span> <span class="n">j</span><span class="p">);</span>
+	
+	    <span class="sr">/* Discard the amount of data to seek to the specified 'offset'. */</span>
+	    <span class="n">j</span> <span class="o">=</span> <span class="p">(</span><span class="n">j</span> <span class="o">+</span> <span class="n">skip</span><span class="p">)</span> <span class="o">%</span> <span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_size</span><span class="p">;</span>
+	
+	    <span class="sr">/* Feed slave with data. Since it is a circular buffer we have to
+	     * split the reply in two parts if we are cross-boundary. */</span>
+	    <span class="n">len</span> <span class="o">=</span> <span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_histlen</span> <span class="o">-</span> <span class="n">skip</span><span class="p">;</span>
+	    <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_DEBUG</span><span class="p">,</span> <span class="s2">"[PSYNC] Reply total length: %lld"</span><span class="p">,</span> <span class="n">len</span><span class="p">);</span>
+	    <span class="k">while</span><span class="p">(</span><span class="n">len</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">long</span> <span class="n">long</span> <span class="n">thislen</span> <span class="o">=</span>
+	            <span class="p">((</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_size</span> <span class="o">-</span> <span class="n">j</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">len</span><span class="p">)</span> <span class="p">?</span>
+	            <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_size</span> <span class="o">-</span> <span class="n">j</span><span class="p">)</span> <span class="p">:</span> <span class="n">len</span><span class="p">;</span>
+	
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_DEBUG</span><span class="p">,</span> <span class="s2">"[PSYNC] addReply() length: %lld"</span><span class="p">,</span> <span class="n">thislen</span><span class="p">);</span>
+	        <span class="n">addReplySds</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">sdsnewlen</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog</span> <span class="o">+</span> <span class="n">j</span><span class="p">,</span> <span class="n">thislen</span><span class="p">));</span>
+	        <span class="n">len</span> <span class="o">-=</span> <span class="n">thislen</span><span class="p">;</span>
+	        <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="n">server</span><span class="p">.</span><span class="nf">repl_backlog_histlen</span> <span class="o">-</span> <span class="n">skip</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<h2 id="心跳检测">心跳检测</h2>
+<p>在命令传播阶段，从服务器会默认以每秒一次的频率，向主服务器发送命令：</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>REPLCONF ACK &lt;replication_offset&gt;
+</code></pre></div></div>
+
+<p><code class="highlighter-rouge">replication_offset</code> 是从服务器当前的复制偏移量。发送该命令的作用：</p>
+
+<ul>
+  <li>检测主从服务器的网络连接状态</li>
+  <li>辅助实现 min-slaves</li>
+  <li>检测命令丢失</li>
+</ul>
+
+<p>replication.c 中的 <code class="highlighter-rouge">replicationCron</code> 函数每秒执行一次，</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>void replicationCron (void)
+{
+	...
+    /* Send ACK to master from time to time.
+     * Note that we do not send periodic acks to masters that don't
+     * support PSYNC and replication offsets. */
+    if (server.masterhost &amp;&amp; server.master &amp;&amp;
+        !(server.master-&gt;flags &amp; REDIS_PRE_PSYNC))
+        replicationSendAck();
+
+	...
+}
+</code></pre></div></div>
+
+<p>从中可知， redis 从服务器会每秒向主服务器发送一次 ACK</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Send a REPLCONF ACK command to the master to inform it about the current
+	 * processed offset. If we are not connected with a master, the command has
+	 * no effects. */</span>
+	<span class="n">void</span> <span class="n">replicationSendAck</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span> <span class="o">=</span> <span class="n">server</span><span class="p">.</span><span class="nf">master</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">c</span> <span class="o">!=</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_MASTER_FORCE_REPLY</span><span class="p">;</span>
+	        <span class="n">addReplyMultiBulkLen</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="mi">3</span><span class="p">);</span>
+	        <span class="n">addReplyBulkCString</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="s2">"REPLCONF"</span><span class="p">);</span>
+	        <span class="n">addReplyBulkCString</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="s2">"ACK"</span><span class="p">);</span>
+	        <span class="n">addReplyBulkLongLong</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">reploff</span><span class="p">);</span>
+	        <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;=</span> <span class="o">~</span><span class="no">REDIS_MASTER_FORCE_REPLY</span><span class="p">;</span>
+	    <span class="p">}</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p><code class="highlighter-rouge">reploff</code> 是从服务器的复制偏移量</p>
+<h3 id="检测主从服务器的网络连接状态">检测主从服务器的网络连接状态</h3>
+<p>如果主服务器超过1秒钟没有接收到从服务器发送的 <code class="highlighter-rouge">REPLCONF ACK</code> 命令，那么主服务器就认为主从服务器之间的网络连接出现了问题。</p>
+
+<p>通过向主服务器发送 <code class="highlighter-rouge">INFO REPLICATION</code> ，在列出的参数说明的 lag 一栏中，就表示从服务器最后一次向主服务器发送 <code class="highlighter-rouge">REPLCONF ACK</code> 命令距离现在过了多少秒。</p>
+
+<h3 id="辅助实现-min-slaves">辅助实现 min-slaves</h3>
+<p>在 redis 配置文件中，</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>min-slaves-to-write 3
+min-slaves-max-lag 10
+</code></pre></div></div>
+
+<p>这两个参数，<code class="highlighter-rouge">require at least 3 slaves with a lag &lt;= 10 seconds</code>，也就是说，当从服务器的数量少于三个或者三个从服务器的延迟 (lag) 都大于等于 10 秒时，主服务器将拒绝执行写命令。</p>
+
+<p>在 redis.c 的 <code class="highlighter-rouge">processCommand</code> 函数中实现</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">int</span> <span class="n">processCommand</span> <span class="p">(</span><span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span><span class="p">)</span>
+	<span class="p">{</span>
+		<span class="o">...</span>
+	    <span class="sr">/* Don't accept write commands if there are not enough good slaves and
+	     * user configured the min-slaves-to-write option. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">masterhost</span> <span class="o">==</span> <span class="no">NULL</span> <span class="o">&amp;&amp;</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">repl_min_slaves_to_write</span> <span class="o">&amp;&amp;</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">repl_min_slaves_max_lag</span> <span class="o">&amp;&amp;</span>
+	        <span class="n">c</span><span class="o">-&gt;</span><span class="n">cmd</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_CMD_WRITE</span> <span class="o">&amp;&amp;</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">repl_good_slaves_count</span> <span class="o">&lt;</span> <span class="n">server</span><span class="p">.</span><span class="nf">repl_min_slaves_to_write</span><span class="p">)</span>
+	    <span class="p">{</span>
+	        <span class="n">flagTransaction</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+	        <span class="n">addReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span> <span class="n">shared</span><span class="p">.</span><span class="nf">noreplicaserr</span><span class="p">);</span>	<span class="sr">//</span><span class="o">-</span><span class="no">NOREPLICAS</span> <span class="no">Not</span> <span class="n">enough</span> <span class="n">good</span> <span class="n">slaves</span> <span class="n">to</span> <span class="n">write</span><span class="o">.</span><span class="p">\</span><span class="n">r</span><span class="p">\</span><span class="n">n</span>
+	        <span class="k">return</span> <span class="no">REDIS_OK</span><span class="p">;</span>
+	    <span class="p">}</span>
+		<span class="o">...</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>如果不满足条件，主服务器将返回 <code class="highlighter-rouge">-NOREPLICAS Not enough good slaves to write.</code></p>
+
+<p>在 replication.c 的 <code class="highlighter-rouge">refreshGoodSlavesCount(void)</code> 函数中，会对 <code class="highlighter-rouge">repl_good_slaves_count</code> 这个属性进行更新。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* This function counts the number of slaves with lag &lt;= min-slaves-max-lag.
+	 * If the option is active, the server will prevent writes if there are not
+	 * enough connected slaves with the specified lag (or less). */</span>
+	<span class="n">void</span> <span class="n">refreshGoodSlavesCount</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">listIter</span> <span class="n">li</span><span class="p">;</span>
+	    <span class="n">listNode</span> <span class="o">*</span><span class="n">ln</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">good</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_min_slaves_to_write</span> <span class="o">||</span>
+	        <span class="o">!</span><span class="n">server</span><span class="p">.</span><span class="nf">repl_min_slaves_max_lag</span><span class="p">)</span> <span class="k">return</span><span class="p">;</span>
+	
+	    <span class="n">listRewind</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">slaves</span><span class="p">,</span><span class="o">&amp;</span><span class="n">li</span><span class="p">);</span>
+	    <span class="k">while</span><span class="p">((</span><span class="n">ln</span> <span class="o">=</span> <span class="n">listNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">li</span><span class="p">)))</span> <span class="p">{</span>
+	        <span class="n">redisClient</span> <span class="o">*</span><span class="n">slave</span> <span class="o">=</span> <span class="n">ln</span><span class="o">-&gt;</span><span class="n">value</span><span class="p">;</span>
+	        <span class="n">time_t</span> <span class="n">lag</span> <span class="o">=</span> <span class="n">server</span><span class="p">.</span><span class="nf">unixtime</span> <span class="o">-</span> <span class="n">slave</span><span class="o">-&gt;</span><span class="n">repl_ack_time</span><span class="p">;</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="n">slave</span><span class="o">-&gt;</span><span class="n">replstate</span> <span class="o">==</span> <span class="no">REDIS_REPL_ONLINE</span> <span class="o">&amp;&amp;</span>
+	            <span class="n">lag</span> <span class="o">&lt;=</span> <span class="n">server</span><span class="p">.</span><span class="nf">repl_min_slaves_max_lag</span><span class="p">)</span> <span class="n">good</span><span class="o">++</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">repl_good_slaves_count</span> <span class="o">=</span> <span class="n">good</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+

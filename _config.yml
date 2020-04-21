@@ -11,7 +11,7 @@ logo: false
 paginate: 10
 baseurl: /
 #domain_name: 'wuzhenyu.com.cn'
-gems: [jekyll-paginate]
+plugins: [jekyll-paginate]
 
 # Details for the RSS feed generator
 url: 'http://blog.wuzhenyu.com.cn'

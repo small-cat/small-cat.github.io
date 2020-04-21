@@ -1,0 +1,187 @@
+<p>redis 链表解析</p>
+
+<p>redis 中链表结构如下</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">typedef</span> <span class="n">struct</span> <span class="n">listNode</span> <span class="p">{</span>
+	    <span class="n">struct</span> <span class="n">listNode</span> <span class="o">*</span><span class="n">prev</span><span class="p">;</span>	<span class="sr">//</span><span class="err">指向前驱指针</span>
+	    <span class="n">struct</span> <span class="n">listNode</span> <span class="o">*</span><span class="k">next</span><span class="p">;</span>	<span class="sr">//</span><span class="err">指向后继指针</span>
+	    <span class="n">void</span> <span class="o">*</span><span class="n">value</span><span class="p">;</span>
+	<span class="p">}</span> <span class="n">listNode</span><span class="p">;</span>	<span class="sr">//</span><span class="err">节点</span>
+	
+	<span class="n">typedef</span> <span class="n">struct</span> <span class="n">list</span> <span class="p">{</span>
+	    <span class="n">listNode</span> <span class="o">*</span><span class="n">head</span><span class="p">;</span>		<span class="sr">//</span><span class="err">头结点</span>
+	    <span class="n">listNode</span> <span class="o">*</span><span class="n">tail</span><span class="p">;</span>		<span class="sr">//</span><span class="err">尾节点</span>
+	    <span class="n">void</span> <span class="o">*</span><span class="p">(</span><span class="o">*</span><span class="nb">dup</span><span class="p">)(</span><span class="n">void</span> <span class="o">*</span><span class="n">ptr</span><span class="p">);</span>
+	    <span class="n">void</span> <span class="p">(</span><span class="o">*</span><span class="n">free</span><span class="p">)(</span><span class="n">void</span> <span class="o">*</span><span class="n">ptr</span><span class="p">);</span>
+	    <span class="n">int</span> <span class="p">(</span><span class="o">*</span><span class="n">match</span><span class="p">)(</span><span class="n">void</span> <span class="o">*</span><span class="n">ptr</span><span class="p">,</span> <span class="n">void</span> <span class="o">*</span><span class="n">key</span><span class="p">);</span>
+	    <span class="n">unsigned</span> <span class="n">long</span> <span class="n">len</span><span class="p">;</span>
+	<span class="p">}</span> <span class="n">list</span><span class="p">;</span>		<span class="sr">//</span><span class="err">链表</span></code></pre></figure>
+
+<p>redis 的链表为双向链表，每一个链表结点同时具有一个指向前驱和指向其后继节点的指针，多个节点就组成了一个双向链表。</p>
+
+<p>list 结构为链表提供了头指针 head 和尾指针 tail，以及链表长度计数器 len，free 和 match 则用于实现多态链表所需的类型特定函数: <br /></p>
+
+<ul>
+  <li>dup 用于复制节点所保存的值</li>
+  <li>free 用于释放节点所保存的值</li>
+  <li>match 用于比对节点所保存的值与另一个输入值是否相等</li>
+</ul>
+
+<h2 id="创建链表">创建链表</h2>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Create a new list. The created list can be freed with
+	 * AlFreeList(), but private value of every node need to be freed
+	 * by the user before to call AlFreeList().
+	 *
+	 * On error, NULL is returned. Otherwise the pointer to the new list. */</span>
+	<span class="n">list</span> <span class="o">*</span><span class="n">listCreate</span><span class="p">(</span><span class="n">void</span><span class="p">)</span>
+	<span class="p">{</span>
+	    <span class="n">struct</span> <span class="n">list</span> <span class="o">*</span><span class="n">list</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">((</span><span class="n">list</span> <span class="o">=</span> <span class="n">zmalloc</span><span class="p">(</span><span class="n">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">list</span><span class="p">)))</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span>
+	        <span class="k">return</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span> <span class="o">=</span> <span class="n">list</span><span class="o">-&gt;</span><span class="n">tail</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="n">len</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="nb">dup</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="n">free</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="n">match</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">list</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>创建链表，链表没有节点，头尾指针均指向<code class="highlighter-rouge">NULL</code></p>
+
+<h2 id="从链表头或者链表尾插入新节点">从链表头或者链表尾插入新节点</h2>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Add a new node to the list, to head, containing the specified 'value'
+	 * pointer as value.
+	 *
+	 * On error, NULL is returned and no operation is performed (i.e. the
+	 * list remains unaltered).
+	 * On success the 'list' pointer you pass to the function is returned. */</span>
+	<span class="n">list</span> <span class="o">*</span><span class="n">listAddNodeHead</span><span class="p">(</span><span class="n">list</span> <span class="o">*</span><span class="n">list</span><span class="p">,</span> <span class="n">void</span> <span class="o">*</span><span class="n">value</span><span class="p">)</span>
+	<span class="p">{</span>
+	    <span class="n">listNode</span> <span class="o">*</span><span class="n">node</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">((</span><span class="n">node</span> <span class="o">=</span> <span class="n">zmalloc</span><span class="p">(</span><span class="n">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">node</span><span class="p">)))</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span>
+	        <span class="k">return</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="n">node</span><span class="o">-&gt;</span><span class="n">value</span> <span class="o">=</span> <span class="n">value</span><span class="p">;</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">list</span><span class="o">-&gt;</span><span class="n">len</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>	<span class="sr">//</span><span class="err">链表为空</span>
+	        <span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span> <span class="o">=</span> <span class="n">list</span><span class="o">-&gt;</span><span class="n">tail</span> <span class="o">=</span> <span class="n">node</span><span class="p">;</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="n">prev</span> <span class="o">=</span> <span class="n">node</span><span class="o">-&gt;</span><span class="k">next</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>	<span class="sr">//</span><span class="err">从头插入，头节点的</span> <span class="n">prev</span> <span class="err">指向</span> <span class="no">NULL</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="n">prev</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="k">next</span> <span class="o">=</span> <span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span><span class="p">;</span>
+	        <span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span><span class="o">-&gt;</span><span class="n">prev</span> <span class="o">=</span> <span class="n">node</span><span class="p">;</span>
+	        <span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span> <span class="o">=</span> <span class="n">node</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="n">len</span><span class="o">++</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">list</span><span class="p">;</span>
+	<span class="p">}</span>
+	
+	<span class="sr">/* Add a new node to the list, to tail, containing the specified 'value'
+	 * pointer as value.
+	 *
+	 * On error, NULL is returned and no operation is performed (i.e. the
+	 * list remains unaltered).
+	 * On success the 'list' pointer you pass to the function is returned. */</span>
+	<span class="n">list</span> <span class="o">*</span><span class="n">listAddNodeTail</span><span class="p">(</span><span class="n">list</span> <span class="o">*</span><span class="n">list</span><span class="p">,</span> <span class="n">void</span> <span class="o">*</span><span class="n">value</span><span class="p">)</span>
+	<span class="p">{</span>
+	    <span class="n">listNode</span> <span class="o">*</span><span class="n">node</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">((</span><span class="n">node</span> <span class="o">=</span> <span class="n">zmalloc</span><span class="p">(</span><span class="n">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">node</span><span class="p">)))</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span>
+	        <span class="k">return</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="n">node</span><span class="o">-&gt;</span><span class="n">value</span> <span class="o">=</span> <span class="n">value</span><span class="p">;</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">list</span><span class="o">-&gt;</span><span class="n">len</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span> <span class="o">=</span> <span class="n">list</span><span class="o">-&gt;</span><span class="n">tail</span> <span class="o">=</span> <span class="n">node</span><span class="p">;</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="n">prev</span> <span class="o">=</span> <span class="n">node</span><span class="o">-&gt;</span><span class="k">next</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>	<span class="sr">//</span><span class="err">从尾插入，尾指针的</span> <span class="k">next</span> <span class="err">指向</span> <span class="no">NULL</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="n">prev</span> <span class="o">=</span> <span class="n">list</span><span class="o">-&gt;</span><span class="n">tail</span><span class="p">;</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="k">next</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	        <span class="n">list</span><span class="o">-&gt;</span><span class="n">tail</span><span class="o">-&gt;</span><span class="k">next</span> <span class="o">=</span> <span class="n">node</span><span class="p">;</span>
+	        <span class="n">list</span><span class="o">-&gt;</span><span class="n">tail</span> <span class="o">=</span> <span class="n">node</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="n">len</span><span class="o">++</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">list</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<h2 id="在指定节点处添加新节点">在指定节点处添加新节点</h2>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">list</span> <span class="o">*</span><span class="n">listInsertNode</span><span class="p">(</span><span class="n">list</span> <span class="o">*</span><span class="n">list</span><span class="p">,</span> <span class="n">listNode</span> <span class="o">*</span><span class="n">old_node</span><span class="p">,</span> <span class="n">void</span> <span class="o">*</span><span class="n">value</span><span class="p">,</span> <span class="n">int</span> <span class="n">after</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">listNode</span> <span class="o">*</span><span class="n">node</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">((</span><span class="n">node</span> <span class="o">=</span> <span class="n">zmalloc</span><span class="p">(</span><span class="n">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">node</span><span class="p">)))</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span>
+	        <span class="k">return</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="n">node</span><span class="o">-&gt;</span><span class="n">value</span> <span class="o">=</span> <span class="n">value</span><span class="p">;</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">after</span><span class="p">)</span> <span class="p">{</span>	<span class="sr">//</span><span class="err">在</span> <span class="n">old_node</span> <span class="err">节点后插入节点</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="n">prev</span> <span class="o">=</span> <span class="n">old_node</span><span class="p">;</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="k">next</span> <span class="o">=</span> <span class="n">old_node</span><span class="o">-&gt;</span><span class="k">next</span><span class="p">;</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">list</span><span class="o">-&gt;</span><span class="n">tail</span> <span class="o">==</span> <span class="n">old_node</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">list</span><span class="o">-&gt;</span><span class="n">tail</span> <span class="o">=</span> <span class="n">node</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>	<span class="sr">//</span><span class="err">在</span><span class="n">old_node</span><span class="err">节点前插入节点</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="k">next</span> <span class="o">=</span> <span class="n">old_node</span><span class="p">;</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="n">prev</span> <span class="o">=</span> <span class="n">old_node</span><span class="o">-&gt;</span><span class="n">prev</span><span class="p">;</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span> <span class="o">==</span> <span class="n">old_node</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span> <span class="o">=</span> <span class="n">node</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">node</span><span class="o">-&gt;</span><span class="n">prev</span> <span class="o">!=</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="n">prev</span><span class="o">-&gt;</span><span class="k">next</span> <span class="o">=</span> <span class="n">node</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">node</span><span class="o">-&gt;</span><span class="k">next</span> <span class="o">!=</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">node</span><span class="o">-&gt;</span><span class="k">next</span><span class="o">-&gt;</span><span class="n">prev</span> <span class="o">=</span> <span class="n">node</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="n">len</span><span class="o">++</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">list</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<h2 id="旋转链表将链表尾节点插入到头部">旋转链表，将链表尾节点插入到头部</h2>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Rotate the list removing the tail node and inserting it to the head. */</span>
+	<span class="n">void</span> <span class="n">listRotate</span><span class="p">(</span><span class="n">list</span> <span class="o">*</span><span class="n">list</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">listNode</span> <span class="o">*</span><span class="n">tail</span> <span class="o">=</span> <span class="n">list</span><span class="o">-&gt;</span><span class="n">tail</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">listLength</span><span class="p">(</span><span class="n">list</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="mi">1</span><span class="p">)</span> <span class="k">return</span><span class="p">;</span>
+	
+	    <span class="sr">/* Detach current tail */</span>
+		<span class="sr">//</span> <span class="err">将尾节点分离出来</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="n">tail</span> <span class="o">=</span> <span class="n">tail</span><span class="o">-&gt;</span><span class="n">prev</span><span class="p">;</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="n">tail</span><span class="o">-&gt;</span><span class="k">next</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="sr">/* Move it as head */</span>
+		<span class="sr">//</span> <span class="err">在头部插入尾节点</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span><span class="o">-&gt;</span><span class="n">prev</span> <span class="o">=</span> <span class="n">tail</span><span class="p">;</span>
+	    <span class="n">tail</span><span class="o">-&gt;</span><span class="n">prev</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="n">tail</span><span class="o">-&gt;</span><span class="k">next</span> <span class="o">=</span> <span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span><span class="p">;</span>
+	    <span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span> <span class="o">=</span> <span class="n">tail</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<h2 id="释放链表">释放链表</h2>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Free the whole list.
+	 *
+	 * This function can't fail. */</span>
+	<span class="n">void</span> <span class="n">listRelease</span><span class="p">(</span><span class="n">list</span> <span class="o">*</span><span class="n">list</span><span class="p">)</span>
+	<span class="p">{</span>
+	    <span class="n">unsigned</span> <span class="n">long</span> <span class="n">len</span><span class="p">;</span>
+	    <span class="n">listNode</span> <span class="o">*</span><span class="n">current</span><span class="p">,</span> <span class="o">*</span><span class="k">next</span><span class="p">;</span>
+	
+	    <span class="n">current</span> <span class="o">=</span> <span class="n">list</span><span class="o">-&gt;</span><span class="n">head</span><span class="p">;</span>
+	    <span class="n">len</span> <span class="o">=</span> <span class="n">list</span><span class="o">-&gt;</span><span class="n">len</span><span class="p">;</span>
+	    <span class="k">while</span><span class="p">(</span><span class="n">len</span><span class="o">--</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">next</span> <span class="o">=</span> <span class="n">current</span><span class="o">-&gt;</span><span class="k">next</span><span class="p">;</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">list</span><span class="o">-&gt;</span><span class="n">free</span><span class="p">)</span> <span class="n">list</span><span class="o">-&gt;</span><span class="n">free</span><span class="p">(</span><span class="n">current</span><span class="o">-&gt;</span><span class="n">value</span><span class="p">);</span>
+	        <span class="n">zfree</span><span class="p">(</span><span class="n">current</span><span class="p">);</span>
+	        <span class="n">current</span> <span class="o">=</span> <span class="k">next</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="n">zfree</span><span class="p">(</span><span class="n">list</span><span class="p">);</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>redis 双向链表的特性： <br /></p>
+
+<ul>
+  <li>链表节点带有 prev 和 next 指针，获取某节点前驱或者后继节点的时间复杂度为 O(1)</li>
+  <li>无环：链表头节点的 prev 指针和尾节点的 next 指针均指向 NULL，即从头遍历或者从尾遍历都是以 NULL 结束链表遍历，不会出现环。</li>
+  <li>头尾指针使得获取链表头尾指针的时间复杂度为 O(1)</li>
+  <li>list 的 长度计数器 len，使得获取链表长度的时间复杂度为 O(1)</li>
+  <li>链表结点通过 <code class="highlighter-rouge">void*</code> 来保存节点值，可以接受任何类型的数据，同时，free，match 和 dup 三个属性为节点值设置类型特定函数，使得链表可以用于保存各种不同类型的值。</li>
+</ul>

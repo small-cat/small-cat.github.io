@@ -1,0 +1,523 @@
+<p>redis源码分析，客户端解读</p>
+
+<p>redis服务器是典型的一对多的服务器应用程序：一个服务器可以与多个客户端连接，每个客户端可以向服务器发送命令请求，而服务器则接受并处理客户端发送的请求，并将处理结果返回给客户端。 <br />
+通过使用I/O多路复用技术， redis 服务器使用单线程单进程的方式处理命令请求，并与多个客户端连接进行网络通讯。</p>
+
+<h2 id="根据-redis-clic-中main函数分析客户端的启动流程">根据 redis-cli.c 中main函数分析客户端的启动流程</h2>
+<p><img src="http://oszgzpzz4.bkt.clouddn.com/image/redis_analysis/client-flow.png" alt="client flow" /> <br />
+上图因为在 Visio 中画的，截图的时候图方便，看起来像然在一起。(:haha)</p>
+
+<p>下面看一下客户端的两个重要的全局变量</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>static redisContext *context;
+static struct config
+</code></pre></div></div>
+
+<p>启动客户端时，会初始化 <code class="highlighter-rouge">config</code> 全局变量，该变量记录了客户端几乎所有的配置参数信息，而 <code class="highlighter-rouge">context</code> 用于连接 redis 服务器。看一下 config 的结构</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">static</span> <span class="n">struct</span> <span class="n">config</span> <span class="p">{</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">hostip</span><span class="p">;</span>	<span class="sr">//</span> <span class="no">IP</span>
+	    <span class="n">int</span> <span class="n">hostport</span><span class="p">;</span>	<span class="sr">//</span><span class="err">端口</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">hostsocket</span><span class="p">;</span>
+	    <span class="n">long</span> <span class="n">repeat</span><span class="p">;</span>
+	    <span class="n">long</span> <span class="n">interval</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">dbnum</span><span class="p">;</span>		<span class="sr">//</span><span class="err">数据库编号，一般默认是</span><span class="mi">0</span><span class="o">-</span><span class="mi">15</span>
+	    <span class="n">int</span> <span class="n">interactive</span><span class="p">;</span>	<span class="sr">//</span><span class="err">交互模式</span>
+	    <span class="n">int</span> <span class="n">shutdown</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">monitor_mode</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">pubsub_mode</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">latency_mode</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">latency_dist_mode</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">latency_history</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">lru_test_mode</span><span class="p">;</span>
+	    <span class="n">long</span> <span class="n">long</span> <span class="n">lru_test_sample_size</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">cluster_mode</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">cluster_reissue_command</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">slave_mode</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">pipe_mode</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">pipe_timeout</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">getrdb_mode</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">stat_mode</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">scan_mode</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">intrinsic_latency_mode</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">intrinsic_latency_duration</span><span class="p">;</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">pattern</span><span class="p">;</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">rdb_filename</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">bigkeys</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">stdinarg</span><span class="p">;</span> <span class="sr">/* get last arg from stdin. (-x option) */</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">auth</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">output</span><span class="p">;</span> <span class="sr">/* output mode, see OUTPUT_* defines */</span>
+	    <span class="n">sds</span> <span class="n">mb_delim</span><span class="p">;</span>
+	    <span class="n">char</span> <span class="n">prompt</span><span class="p">[</span><span class="mi">128</span><span class="p">];</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="nb">eval</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">last_cmd_type</span><span class="p">;</span>
+	<span class="p">}</span> <span class="n">config</span><span class="p">;</span></code></pre></figure>
+
+<p>客户端在 <code class="highlighter-rouge">parseOptions()</code> 中设置 config 变量参数</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">static</span> <span class="n">int</span> <span class="n">parseOptions</span><span class="p">(</span><span class="n">int</span> <span class="n">argc</span><span class="p">,</span> <span class="n">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">int</span> <span class="n">i</span><span class="p">;</span>
+	
+	    <span class="k">for</span> <span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">argc</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">int</span> <span class="n">lastarg</span> <span class="o">=</span> <span class="n">i</span><span class="o">==</span><span class="n">argc</span><span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-h"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>	<span class="sr">//</span><span class="p">.</span><span class="nf">/</span><span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">-</span><span class="n">h</span> <span class="mf">10.255</span><span class="o">.</span><span class="mf">245.41</span>
+	            <span class="n">sdsfree</span><span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="nf">hostip</span><span class="p">);</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">hostip</span> <span class="o">=</span> <span class="n">sdsnew</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">]);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-h"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>	<span class="sr">//</span><span class="p">.</span><span class="nf">/</span><span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">-</span><span class="n">h</span>
+	            <span class="n">usage</span><span class="p">();</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--help"</span><span class="p">))</span> <span class="p">{</span>		<span class="sr">//</span> <span class="p">.</span><span class="nf">/</span><span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">--</span><span class="n">help</span>
+	            <span class="n">usage</span><span class="p">();</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-x"</span><span class="p">))</span> <span class="p">{</span>			<span class="sr">//</span> <span class="p">.</span><span class="nf">/</span><span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">-</span><span class="n">x</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">stdinarg</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-p"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>		<span class="sr">//</span> <span class="p">.</span><span class="nf">/</span><span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">-</span><span class="nb">p</span> <span class="p">[</span><span class="no">PORT</span><span class="p">]</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">hostport</span> <span class="o">=</span> <span class="n">atoi</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">]);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-s"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>		<span class="sr">//</span> <span class="p">.</span><span class="nf">/</span><span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">-</span><span class="n">s</span> <span class="o">&lt;</span><span class="n">socket</span><span class="o">&gt;</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">hostsocket</span> <span class="o">=</span> <span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">];</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-r"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>		<span class="sr">//</span> <span class="p">.</span><span class="nf">/</span><span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">-</span><span class="n">r</span> <span class="o">&lt;</span><span class="n">repeat</span><span class="o">&gt;</span><span class="p">,</span> <span class="n">execute</span> <span class="n">specified</span> <span class="n">command</span> <span class="no">N</span> <span class="n">times</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">repeat</span> <span class="o">=</span> <span class="n">strtoll</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">],</span><span class="no">NULL</span><span class="p">,</span><span class="mi">10</span><span class="p">);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-i"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>		<span class="sr">//</span> <span class="p">.</span><span class="nf">/</span><span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">-</span><span class="n">i</span> <span class="o">&lt;</span><span class="n">interval</span><span class="o">&gt;</span><span class="p">,</span> <span class="n">used</span> <span class="n">with</span> <span class="o">-</span><span class="n">r</span>
+	            <span class="n">double</span> <span class="n">seconds</span> <span class="o">=</span> <span class="n">atof</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">]);</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">interval</span> <span class="o">=</span> <span class="n">seconds</span><span class="o">*</span><span class="mi">1000000</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-n"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>		<span class="sr">//</span> <span class="p">.</span><span class="nf">/</span><span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">-</span><span class="n">n</span> <span class="o">&lt;</span><span class="n">dbnum</span><span class="o">&gt;</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">dbnum</span> <span class="o">=</span> <span class="n">atoi</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">]);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-a"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>		<span class="sr">//</span> <span class="p">.</span><span class="nf">/</span><span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">-</span><span class="n">a</span> <span class="o">&lt;</span><span class="n">password</span><span class="o">&gt;</span><span class="p">,</span> <span class="n">connect</span> <span class="n">to</span> <span class="n">server</span> <span class="n">with</span> <span class="n">password</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">auth</span> <span class="o">=</span> <span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">];</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--raw"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">output</span> <span class="o">=</span> <span class="no">OUTPUT_RAW</span><span class="p">;</span>		<span class="sr">//</span> <span class="n">no</span> <span class="n">formatted</span> <span class="n">output</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--no-raw"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">output</span> <span class="o">=</span> <span class="no">OUTPUT_STANDARD</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--csv"</span><span class="p">))</span> <span class="p">{</span>		<span class="sr">//</span><span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">--</span><span class="n">csv</span><span class="p">,</span> <span class="n">output</span> <span class="k">in</span> <span class="n">csv</span> <span class="nb">format</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">output</span> <span class="o">=</span> <span class="no">OUTPUT_CSV</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--latency"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">latency_mode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--latency-dist"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">latency_dist_mode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--mono"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">spectrum_palette</span> <span class="o">=</span> <span class="n">spectrum_palette_mono</span><span class="p">;</span>
+	            <span class="n">spectrum_palette_size</span> <span class="o">=</span> <span class="n">spectrum_palette_mono_size</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--latency-history"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">latency_mode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">latency_history</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--lru-test"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">lru_test_mode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">lru_test_sample_size</span> <span class="o">=</span> <span class="n">strtoll</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">],</span><span class="no">NULL</span><span class="p">,</span><span class="mi">10</span><span class="p">);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--slave"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">slave_mode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--stat"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">stat_mode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--scan"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">scan_mode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--pattern"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">pattern</span> <span class="o">=</span> <span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">];</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--intrinsic-latency"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">intrinsic_latency_mode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">intrinsic_latency_duration</span> <span class="o">=</span> <span class="n">atoi</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">]);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--rdb"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>	<span class="sr">//</span> <span class="n">redis</span><span class="o">-</span><span class="n">cli</span> <span class="o">--</span><span class="n">rdb</span> <span class="o">&lt;</span><span class="n">rdbfilename</span><span class="o">&gt;</span><span class="p">,</span> <span class="n">transfer</span> <span class="n">an</span> <span class="n">rdb</span> <span class="n">dump</span> <span class="n">from</span> <span class="n">remote</span> <span class="n">server</span> <span class="n">to</span> <span class="n">local</span> <span class="n">file</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">getrdb_mode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">rdb_filename</span> <span class="o">=</span> <span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">];</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--pipe"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">pipe_mode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--pipe-timeout"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">pipe_timeout</span> <span class="o">=</span> <span class="n">atoi</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">]);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--bigkeys"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">bigkeys</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"--eval"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">eval</span> <span class="o">=</span> <span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">];</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-c"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">cluster_mode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-d"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">lastarg</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">sdsfree</span><span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="nf">mb_delim</span><span class="p">);</span>
+	            <span class="n">config</span><span class="p">.</span><span class="nf">mb_delim</span> <span class="o">=</span> <span class="n">sdsnew</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="o">++</span><span class="n">i</span><span class="p">]);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">"-v"</span><span class="p">)</span> <span class="o">||</span> <span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="s2">"--version"</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">sds</span> <span class="n">version</span> <span class="o">=</span> <span class="n">cliVersion</span><span class="p">();</span>
+	            <span class="nb">printf</span><span class="p">(</span><span class="s2">"redis-cli %s</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span> <span class="n">version</span><span class="p">);</span>
+	            <span class="n">sdsfree</span><span class="p">(</span><span class="n">version</span><span class="p">);</span>
+	            <span class="nb">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'-'</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span>
+	                    <span class="s2">"Unrecognized option or bad number of args for: '%s'</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span>
+	                    <span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+	                <span class="nb">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+	            <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	                <span class="sr">/* Likely the command name, stop here. */</span>
+	                <span class="k">break</span><span class="p">;</span>
+	            <span class="p">}</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="n">i</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>上述解析命令行参数的各个参数信息，在客户端，使用 <code class="highlighter-rouge">--help</code> 就能看到，</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>void usage(void) {
+    fprintf(stderr,"Usage: ./redis-server [/path/to/redis.conf] [options]\n");
+    fprintf(stderr,"       ./redis-server - (read config from stdin)\n");
+    fprintf(stderr,"       ./redis-server -v or --version\n");
+    fprintf(stderr,"       ./redis-server -h or --help\n");
+    fprintf(stderr,"       ./redis-server --test-memory &lt;megabytes&gt;\n\n");
+    fprintf(stderr,"Examples:\n");
+    fprintf(stderr,"       ./redis-server (run the server with default conf)\n");
+    fprintf(stderr,"       ./redis-server /etc/redis/6379.conf\n");
+    fprintf(stderr,"       ./redis-server --port 7777\n");
+    fprintf(stderr,"       ./redis-server --port 7777 --slaveof 127.0.0.1 8888\n");
+    fprintf(stderr,"       ./redis-server /etc/myredis.conf --loglevel verbose\n\n");
+    fprintf(stderr,"Sentinel mode:\n");
+    fprintf(stderr,"       ./redis-server /etc/sentinel.conf --sentinel\n");
+    exit(1);
+}
+</code></pre></div></div>
+
+<p>根据不同的参数，设置 config 的值，然后，根据命令行参数设定的值和模式(mode)，选择进入不同的模式与 redis 服务器进行通讯。在本机上，直接启动 redis 客户端，比如 <code class="highlighter-rouge">./redis-cli</code> ，这样客户端启动之后，进入的将是交互模式，<code class="highlighter-rouge">config.interactive = 1</code>，这种模式下，用户可以直接在客户端输入指令，并能立马得到服务器返回的信息。下面，主要介绍的就是交互模式。</p>
+
+<p>交互模式下，首先，需要连接服务器，这时，需要用到 context 变量</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Connect to the server. If force is not zero the connection is performed
+	 * even if there is already a connected socket. */</span>
+	<span class="n">static</span> <span class="n">int</span> <span class="n">cliConnect</span><span class="p">(</span><span class="n">int</span> <span class="n">force</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">context</span> <span class="o">==</span> <span class="no">NULL</span> <span class="o">||</span> <span class="n">force</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">context</span> <span class="o">!=</span> <span class="no">NULL</span><span class="p">)</span>
+	            <span class="n">redisFree</span><span class="p">(</span><span class="n">context</span><span class="p">);</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="nf">hostsocket</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">context</span> <span class="o">=</span> <span class="n">redisConnect</span><span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="nf">hostip</span><span class="p">,</span><span class="n">config</span><span class="p">.</span><span class="nf">hostport</span><span class="p">);</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">context</span> <span class="o">=</span> <span class="n">redisConnectUnix</span><span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="nf">hostsocket</span><span class="p">);</span>
+	        <span class="p">}</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="n">context</span><span class="o">-&gt;</span><span class="n">err</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="s2">"Could not connect to Redis at "</span><span class="p">);</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="nf">hostsocket</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span>
+	                <span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="s2">"%s:%d: %s</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="n">config</span><span class="p">.</span><span class="nf">hostip</span><span class="p">,</span><span class="n">config</span><span class="p">.</span><span class="nf">hostport</span><span class="p">,</span><span class="n">context</span><span class="o">-&gt;</span><span class="n">errstr</span><span class="p">);</span>
+	            <span class="k">else</span>
+	                <span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="s2">"%s: %s</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="n">config</span><span class="p">.</span><span class="nf">hostsocket</span><span class="p">,</span><span class="n">context</span><span class="o">-&gt;</span><span class="n">errstr</span><span class="p">);</span>
+	            <span class="n">redisFree</span><span class="p">(</span><span class="n">context</span><span class="p">);</span>
+	            <span class="n">context</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	            <span class="k">return</span> <span class="no">REDIS_ERR</span><span class="p">;</span>
+	        <span class="p">}</span>
+	
+	        <span class="sr">/* Set aggressive KEEP_ALIVE socket option in the Redis context socket
+	         * in order to prevent timeouts caused by the execution of long
+	         * commands. At the same time this improves the detection of real
+	         * errors. */</span>
+	        <span class="n">anetKeepAlive</span><span class="p">(</span><span class="no">NULL</span><span class="p">,</span> <span class="n">context</span><span class="o">-&gt;</span><span class="n">fd</span><span class="p">,</span> <span class="no">REDIS_CLI_KEEPALIVE_INTERVAL</span><span class="p">);</span>
+	
+	        <span class="sr">/* Do AUTH and select the right DB. */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">cliAuth</span><span class="p">()</span> <span class="o">!=</span> <span class="no">REDIS_OK</span><span class="p">)</span>
+	            <span class="k">return</span> <span class="no">REDIS_ERR</span><span class="p">;</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">cliSelect</span><span class="p">()</span> <span class="o">!=</span> <span class="no">REDIS_OK</span><span class="p">)</span>
+	            <span class="k">return</span> <span class="no">REDIS_ERR</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="no">REDIS_OK</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>当服务器连接成功时，context 的 fd 为连接成功后的 sockfd，flags 设置为
+REDIS_CONNECTED，redisContext 的结构如下</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Context for a connection to Redis */
+typedef struct redisContext {
+    int err; /* Error flags, 0 when there is no error */
+    char errstr[128]; /* String representation of error when applicable */
+    int fd;
+    int flags;
+    char *obuf; /* Write buffer */
+    redisReader *reader; /* Protocol reader */
+} redisContext;
+</code></pre></div></div>
+
+<p>当连接服务器或者命令发生错误时，err将设置为非0数字，errstr 中将记录错误信息，连接成功时，将 socket 套接字的文件描述符记录在 fd 中，同时 flags 设置为 REDIS_CONNECTED，obuf 为输出缓存，客户端发送给服务器的命令信息，解析后存放在 obuf 中，reader 作为协议解析器，用于读取和分析服务器返回的信息。</p>
+
+<p>当客户端成功连接 redis 服务器之后，需要对客户端的身份进行验证（前提是服务器打开了验证的功能），<code class="highlighter-rouge">cliAuth()</code>，如果验证失败，出了 AUTH 操作之外， 服务器将决绝客户端发送的一切其他命令操作。</p>
+
+<p><code class="highlighter-rouge">cliSelect()</code>，用于客户端选择 redis 数据库，通过 <code class="highlighter-rouge">select dbnum</code> 的指令进行数据库选择。</p>
+
+<p>服务器连接成功，进入到交互模式下，与服务器交互。但是在交互之前，还需要设置一下终端的模式。</p>
+<h2 id="客户端的交互模式">客户端的交互模式</h2>
+<h3 id="准备工作">准备工作</h3>
+<p>客户端进入交互模式如下所示 <br />
+<img src="http://oszgzpzz4.bkt.clouddn.com/image/redis_analysis/redis-cli-interactive-mode.png" alt="redis client interactive mode" /> <br />
+也就是说，在用户通过客户端与服务器交互之前，还需要一些准备工作。</p>
+
+<p>redis 会将在客户端上操作的所有命令记录在一个历史文件中 <code class="highlighter-rouge">historyfile</code>，如果没有设置，一般默认为 <code class="highlighter-rouge">$HOME/.rediscli_history</code> 文件。同时，设置提示信息 <code class="highlighter-rouge">config.prompt</code>，如上图所示的提示信息为 “127.0.0.1:6379&gt;”，这里默认的数据库编号为 0 ，所以没有显示出来，如果是非 0 的数据库，比如是 1，需要重新设置提示信息，为 “127.0.0.1:6379[1]&gt;”。</p>
+
+<h3 id="在交互模式下获取用户输入">在交互模式下获取用户输入</h3>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* The high level function that is the main API of the linenoise library.
+	 * This function checks if the terminal has basic capabilities, just checking
+	 * for a blacklist of stupid terminals, and later either calls the line
+	 * editing function or uses dummy fgets() so that you will be able to type
+	 * something even in the most desperate of the conditions. */</span>
+	<span class="n">char</span> <span class="o">*</span><span class="n">linenoise</span><span class="p">(</span><span class="n">const</span> <span class="n">char</span> <span class="o">*</span><span class="n">prompt</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">char</span> <span class="n">buf</span><span class="p">[</span><span class="no">LINENOISE_MAX_LINE</span><span class="p">];</span>
+	    <span class="n">int</span> <span class="n">count</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">isUnsupportedTerm</span><span class="p">())</span> <span class="p">{</span>	<span class="sr">//no</span><span class="n">t</span> <span class="n">support</span> <span class="n">these</span> <span class="n">terms</span><span class="p">,</span><span class="n">such</span> <span class="n">as</span> <span class="n">dumb</span><span class="p">,</span><span class="n">cons25</span><span class="p">,</span><span class="n">emacs</span>
+	        <span class="n">size_t</span> <span class="n">len</span><span class="p">;</span>
+	
+	        <span class="nb">printf</span><span class="p">(</span><span class="s2">"%s"</span><span class="p">,</span><span class="n">prompt</span><span class="p">);</span>
+	        <span class="n">fflush</span><span class="p">(</span><span class="n">stdout</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">fgets</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="no">LINENOISE_MAX_LINE</span><span class="p">,</span><span class="n">stdin</span><span class="p">)</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="k">return</span> <span class="no">NULL</span><span class="p">;</span>
+	        <span class="n">len</span> <span class="o">=</span> <span class="n">strlen</span><span class="p">(</span><span class="n">buf</span><span class="p">);</span>
+	        <span class="k">while</span><span class="p">(</span><span class="n">len</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">buf</span><span class="p">[</span><span class="n">len</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'\n'</span> <span class="o">||</span> <span class="n">buf</span><span class="p">[</span><span class="n">len</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'\r'</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">len</span><span class="o">--</span><span class="p">;</span>
+	            <span class="n">buf</span><span class="p">[</span><span class="n">len</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'\0'</span><span class="p">;</span>
+	        <span class="p">}</span>
+	        <span class="k">return</span> <span class="n">strdup</span><span class="p">(</span><span class="n">buf</span><span class="p">);</span>	<span class="sr">//s</span><span class="n">hould</span> <span class="n">be</span> <span class="n">free</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="n">count</span> <span class="o">=</span> <span class="n">linenoiseRaw</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="no">LINENOISE_MAX_LINE</span><span class="p">,</span><span class="n">prompt</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">count</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">return</span> <span class="no">NULL</span><span class="p">;</span>
+	        <span class="k">return</span> <span class="n">strdup</span><span class="p">(</span><span class="n">buf</span><span class="p">);</span>
+	    <span class="p">}</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>redis 通过上面的 <code class="highlighter-rouge">linenoise()</code> 函数获取用户输入，首先判断当前终端是不是 redis 所支持的终端类型（通过判断环境变量 <code class="highlighter-rouge">TERM</code>），如果不是，通过 fgets 函数获取用户输入；如果是支持的终端，那么首先通过 <code class="highlighter-rouge">termios</code> 相关的API，将 term 设置为 <code class="highlighter-rouge">raw mode</code>，该模式下，用户输入一个字符时，程序就会立即处理，类似于ncurses 中的 cbreak 模式，在 <code class="highlighter-rouge">linenoiseEdit()</code> 函数中，redis 对用户键盘的各种操作进行处理，并记录用户输入的有效字符</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* This function is the core of the line editing capability of linenoise.
+	 * It expects 'fd' to be already in "raw mode" so that every key pressed
+	 * will be returned ASAP to read().
+	 *
+	 * The resulting string is put into 'buf' when the user type enter, or
+	 * when ctrl+d is typed.
+	 *
+	 * The function returns the length of the current buffer. */</span>
+	<span class="n">static</span> <span class="n">int</span> <span class="n">linenoiseEdit</span><span class="p">(</span><span class="n">int</span> <span class="n">stdin_fd</span><span class="p">,</span> <span class="n">int</span> <span class="n">stdout_fd</span><span class="p">,</span> <span class="n">char</span> <span class="o">*</span><span class="n">buf</span><span class="p">,</span> <span class="n">size_t</span> <span class="n">buflen</span><span class="p">,</span> <span class="n">const</span> <span class="n">char</span> <span class="o">*</span><span class="n">prompt</span><span class="p">)</span>
+	<span class="p">{</span>
+	    <span class="n">struct</span> <span class="n">linenoiseState</span> <span class="n">l</span><span class="p">;</span>
+	
+	    <span class="sr">/* Populate the linenoise state that we pass to functions implementing
+	     * specific editing functionalities. */</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">ifd</span> <span class="o">=</span> <span class="n">stdin_fd</span><span class="p">;</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">ofd</span> <span class="o">=</span> <span class="n">stdout_fd</span><span class="p">;</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">buf</span> <span class="o">=</span> <span class="n">buf</span><span class="p">;</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">buflen</span> <span class="o">=</span> <span class="n">buflen</span><span class="p">;</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">prompt</span> <span class="o">=</span> <span class="n">prompt</span><span class="p">;</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">plen</span> <span class="o">=</span> <span class="n">strlen</span><span class="p">(</span><span class="n">prompt</span><span class="p">);</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">oldpos</span> <span class="o">=</span> <span class="n">l</span><span class="p">.</span><span class="nf">pos</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">len</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">cols</span> <span class="o">=</span> <span class="n">getColumns</span><span class="p">(</span><span class="n">stdin_fd</span><span class="p">,</span> <span class="n">stdout_fd</span><span class="p">);</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">maxrows</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">history_index</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	
+	    <span class="sr">/* Buffer starts empty. */</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">buf</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'\0'</span><span class="p">;</span>
+	    <span class="n">l</span><span class="p">.</span><span class="nf">buflen</span><span class="o">--</span><span class="p">;</span> <span class="sr">/* Make sure there is always space for the nulterm */</span>
+	
+	    <span class="sr">/* The latest history entry is always our current buffer, that
+	     * initially is just an empty string. */</span>
+	    <span class="n">linenoiseHistoryAdd</span><span class="p">(</span><span class="s2">""</span><span class="p">);</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">write</span><span class="p">(</span><span class="n">l</span><span class="p">.</span><span class="nf">ofd</span><span class="p">,</span><span class="n">prompt</span><span class="p">,</span><span class="n">l</span><span class="p">.</span><span class="nf">plen</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+	    <span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">char</span> <span class="n">c</span><span class="p">;</span>
+	        <span class="n">int</span> <span class="n">nread</span><span class="p">;</span>
+	        <span class="n">char</span> <span class="n">seq</span><span class="p">[</span><span class="mi">3</span><span class="p">];</span>
+	
+	        <span class="n">nread</span> <span class="o">=</span> <span class="n">read</span><span class="p">(</span><span class="n">l</span><span class="p">.</span><span class="nf">ifd</span><span class="p">,</span><span class="o">&amp;</span><span class="n">c</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">nread</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">)</span> <span class="k">return</span> <span class="n">l</span><span class="p">.</span><span class="nf">len</span><span class="p">;</span>	<span class="sr">//n</span><span class="n">read</span> <span class="n">is</span> <span class="mi">0</span><span class="p">,</span> <span class="n">server</span> <span class="n">may</span> <span class="n">close</span> <span class="n">the</span> <span class="n">connect</span>
+	
+	        <span class="sr">/* Only autocomplete when the callback is set. It returns &lt; 0 when
+	         * there was an error reading from fd. Otherwise it will return the
+	         * character that should be handled next. */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">c</span> <span class="o">==</span> <span class="mi">9</span> <span class="o">&amp;&amp;</span> <span class="n">completionCallback</span> <span class="o">!=</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">c</span> <span class="o">=</span> <span class="n">completeLine</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="sr">/* Return on errors */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">c</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="k">return</span> <span class="n">l</span><span class="p">.</span><span class="nf">len</span><span class="p">;</span>
+	            <span class="sr">/* Read next character when 0 */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">c</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="n">continue</span><span class="p">;</span>
+	        <span class="p">}</span>
+	
+	        <span class="n">switch</span><span class="p">(</span><span class="n">c</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">case</span> <span class="no">ENTER</span><span class="p">:</span>    <span class="sr">/* enter */</span>
+	            <span class="n">history_len</span><span class="o">--</span><span class="p">;</span>
+	            <span class="n">free</span><span class="p">(</span><span class="n">history</span><span class="p">[</span><span class="n">history_len</span><span class="p">]);</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">mlmode</span><span class="p">)</span> <span class="n">linenoiseEditMoveEnd</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="k">return</span> <span class="p">(</span><span class="n">int</span><span class="p">)</span><span class="n">l</span><span class="p">.</span><span class="nf">len</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_C</span><span class="p">:</span>     <span class="sr">/* ctrl-c */</span>
+	            <span class="n">errno</span> <span class="o">=</span> <span class="no">EAGAIN</span><span class="p">;</span>
+	            <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">BACKSPACE</span><span class="p">:</span>   <span class="sr">/* backspace */</span>
+	        <span class="k">case</span> <span class="mi">8</span><span class="p">:</span>     <span class="sr">/* ctrl-h */</span>
+	            <span class="n">linenoiseEditBackspace</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_D</span><span class="p">:</span>     <span class="sr">/* ctrl-d, remove char at right of cursor, or if the
+	                            line is empty, act as end-of-file. */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">l</span><span class="p">.</span><span class="nf">len</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">linenoiseEditDelete</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	                <span class="n">history_len</span><span class="o">--</span><span class="p">;</span>
+	                <span class="n">free</span><span class="p">(</span><span class="n">history</span><span class="p">[</span><span class="n">history_len</span><span class="p">]);</span>
+	                <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+	            <span class="p">}</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_T</span><span class="p">:</span>    <span class="sr">/* ctrl-t, swaps current character with previous. */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">l</span><span class="p">.</span><span class="nf">pos</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">l</span><span class="p">.</span><span class="nf">pos</span> <span class="o">&lt;</span> <span class="n">l</span><span class="p">.</span><span class="nf">len</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">int</span> <span class="n">aux</span> <span class="o">=</span> <span class="n">buf</span><span class="p">[</span><span class="n">l</span><span class="p">.</span><span class="nf">pos</span><span class="o">-</span><span class="mi">1</span><span class="p">];</span>
+	                <span class="n">buf</span><span class="p">[</span><span class="n">l</span><span class="p">.</span><span class="nf">pos</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">buf</span><span class="p">[</span><span class="n">l</span><span class="p">.</span><span class="nf">pos</span><span class="p">];</span>
+	                <span class="n">buf</span><span class="p">[</span><span class="n">l</span><span class="p">.</span><span class="nf">pos</span><span class="p">]</span> <span class="o">=</span> <span class="n">aux</span><span class="p">;</span>
+	                <span class="k">if</span> <span class="p">(</span><span class="n">l</span><span class="p">.</span><span class="nf">pos</span> <span class="o">!=</span> <span class="n">l</span><span class="p">.</span><span class="nf">len</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="n">l</span><span class="p">.</span><span class="nf">pos</span><span class="o">++</span><span class="p">;</span>
+	                <span class="n">refreshLine</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="p">}</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_B</span><span class="p">:</span>     <span class="sr">/* ctrl-b */</span>
+	            <span class="n">linenoiseEditMoveLeft</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_F</span><span class="p">:</span>     <span class="sr">/* ctrl-f */</span>
+	            <span class="n">linenoiseEditMoveRight</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_P</span><span class="p">:</span>    <span class="sr">/* ctrl-p */</span>
+	            <span class="n">linenoiseEditHistoryNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">,</span> <span class="no">LINENOISE_HISTORY_PREV</span><span class="p">);</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_N</span><span class="p">:</span>    <span class="sr">/* ctrl-n */</span>
+	            <span class="n">linenoiseEditHistoryNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">,</span> <span class="no">LINENOISE_HISTORY_NEXT</span><span class="p">);</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">ESC</span><span class="p">:</span>    <span class="sr">/* escape sequence */</span>
+	            <span class="sr">/* Read the next two bytes representing the escape sequence.
+	             * Use two calls to handle slow terminals returning the two
+	             * chars at different times. */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">l</span><span class="p">.</span><span class="nf">ifd</span><span class="p">,</span><span class="n">seq</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">l</span><span class="p">.</span><span class="nf">ifd</span><span class="p">,</span><span class="n">seq</span><span class="o">+</span><span class="mi">1</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span>
+	
+	            <span class="sr">/* ESC [ sequences. */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">seq</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'['</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="k">if</span> <span class="p">(</span><span class="n">seq</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="s1">'0'</span> <span class="o">&amp;&amp;</span> <span class="n">seq</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="s1">'9'</span><span class="p">)</span> <span class="p">{</span>
+	                    <span class="sr">/* Extended escape, read additional byte. */</span>
+	                    <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">l</span><span class="p">.</span><span class="nf">ifd</span><span class="p">,</span><span class="n">seq</span><span class="o">+</span><span class="mi">2</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span>
+	                    <span class="k">if</span> <span class="p">(</span><span class="n">seq</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'~'</span><span class="p">)</span> <span class="p">{</span>
+	                        <span class="n">switch</span><span class="p">(</span><span class="n">seq</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span> <span class="p">{</span>
+	                        <span class="k">case</span> <span class="s1">'3'</span><span class="p">:</span> <span class="sr">/* Delete key. */</span>
+	                            <span class="n">linenoiseEditDelete</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	                            <span class="k">break</span><span class="p">;</span>
+	                        <span class="p">}</span>
+	                    <span class="p">}</span>
+	                <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	                    <span class="n">switch</span><span class="p">(</span><span class="n">seq</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span> <span class="p">{</span>
+	                    <span class="k">case</span> <span class="s1">'A'</span><span class="p">:</span> <span class="sr">/* Up */</span>
+	                        <span class="n">linenoiseEditHistoryNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">,</span> <span class="no">LINENOISE_HISTORY_PREV</span><span class="p">);</span>
+	                        <span class="k">break</span><span class="p">;</span>
+	                    <span class="k">case</span> <span class="s1">'B'</span><span class="p">:</span> <span class="sr">/* Down */</span>
+	                        <span class="n">linenoiseEditHistoryNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">,</span> <span class="no">LINENOISE_HISTORY_NEXT</span><span class="p">);</span>
+	                        <span class="k">break</span><span class="p">;</span>
+	                    <span class="k">case</span> <span class="s1">'C'</span><span class="p">:</span> <span class="sr">/* Right */</span>
+	                        <span class="n">linenoiseEditMoveRight</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	                        <span class="k">break</span><span class="p">;</span>
+	                    <span class="k">case</span> <span class="s1">'D'</span><span class="p">:</span> <span class="sr">/* Left */</span>
+	                        <span class="n">linenoiseEditMoveLeft</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	                        <span class="k">break</span><span class="p">;</span>
+	                    <span class="k">case</span> <span class="s1">'H'</span><span class="p">:</span> <span class="sr">/* Home */</span>
+	                        <span class="n">linenoiseEditMoveHome</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	                        <span class="k">break</span><span class="p">;</span>
+	                    <span class="k">case</span> <span class="s1">'F'</span><span class="p">:</span> <span class="sr">/* End*/</span>
+	                        <span class="n">linenoiseEditMoveEnd</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	                        <span class="k">break</span><span class="p">;</span>
+	                    <span class="p">}</span>
+	                <span class="p">}</span>
+	            <span class="p">}</span>
+	
+	            <span class="sr">/* ESC O sequences. */</span>
+	            <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">seq</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'O'</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">switch</span><span class="p">(</span><span class="n">seq</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span> <span class="p">{</span>
+	                <span class="k">case</span> <span class="s1">'H'</span><span class="p">:</span> <span class="sr">/* Home */</span>
+	                    <span class="n">linenoiseEditMoveHome</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	                    <span class="k">break</span><span class="p">;</span>
+	                <span class="k">case</span> <span class="s1">'F'</span><span class="p">:</span> <span class="sr">/* End*/</span>
+	                    <span class="n">linenoiseEditMoveEnd</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	                    <span class="k">break</span><span class="p">;</span>
+	                <span class="p">}</span>
+	            <span class="p">}</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="ss">default:
+	            </span><span class="k">if</span> <span class="p">(</span><span class="n">linenoiseEditInsert</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">,</span><span class="n">c</span><span class="p">))</span> <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_U</span><span class="p">:</span> <span class="sr">/* Ctrl+u, delete the whole line. */</span>
+	            <span class="n">buf</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'\0'</span><span class="p">;</span>
+	            <span class="n">l</span><span class="p">.</span><span class="nf">pos</span> <span class="o">=</span> <span class="n">l</span><span class="p">.</span><span class="nf">len</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	            <span class="n">refreshLine</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_K</span><span class="p">:</span> <span class="sr">/* Ctrl+k, delete from current to end of line. */</span>
+	            <span class="n">buf</span><span class="p">[</span><span class="n">l</span><span class="p">.</span><span class="nf">pos</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'\0'</span><span class="p">;</span>
+	            <span class="n">l</span><span class="p">.</span><span class="nf">len</span> <span class="o">=</span> <span class="n">l</span><span class="p">.</span><span class="nf">pos</span><span class="p">;</span>
+	            <span class="n">refreshLine</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_A</span><span class="p">:</span> <span class="sr">/* Ctrl+a, go to the start of the line */</span>
+	            <span class="n">linenoiseEditMoveHome</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_E</span><span class="p">:</span> <span class="sr">/* ctrl+e, go to the end of the line */</span>
+	            <span class="n">linenoiseEditMoveEnd</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_L</span><span class="p">:</span> <span class="sr">/* ctrl+l, clear screen */</span>
+	            <span class="n">linenoiseClearScreen</span><span class="p">();</span>
+	            <span class="n">refreshLine</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="k">case</span> <span class="no">CTRL_W</span><span class="p">:</span> <span class="sr">/* ctrl+w, delete previous word */</span>
+	            <span class="n">linenoiseEditDeletePrevWord</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l</span><span class="p">);</span>
+	            <span class="k">break</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="n">l</span><span class="p">.</span><span class="nf">len</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>获取用户输入之后，将用户输入写入到历史文件中 <code class="highlighter-rouge">historyfile</code> 中，并将用户输入的命令参数解析后，发送到服务器。</p>
+
+<h2 id="客户端发送消息到服务器">客户端发送消息到服务器</h2>
+<p>客户端获取用户输入的命令及参数之后</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>argv = sdssplitargs(line,&amp;argc);
+</code></pre></div></div>
+
+<p>将命令参数放到 argv 数组中，通过 <code class="highlighter-rouge">cliSendCommand()</code> 发送给服务器</p>
+
+<p>客户端发送命令和接受结果的函数调用关系如下: <br /></p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>cliSendCommand -&gt; redisAppendCommandArgv -&gt; redisFormatCommandArgv这是根据 redis 协议格式化输出，发送到服务器
+cliSendCommand -&gt; cliReadReply -&gt; redisGetReply -&gt;
+redisBufferWrite 和 redisBufferRead 发送和接收
+</code></pre></div></div>
+
+<h3 id="redis-协议格式">redis 协议格式</h3>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Format a command according to the Redis protocol. This function takes the
+	 * number of arguments, an array with arguments and an array with their
+	 * lengths. If the latter is set to NULL, strlen will be used to compute the
+	 * argument lengths.
+	 */</span>
+	<span class="n">int</span> <span class="n">redisFormatCommandArgv</span><span class="p">(</span><span class="n">char</span> <span class="o">**</span><span class="n">target</span><span class="p">,</span> <span class="n">int</span> <span class="n">argc</span><span class="p">,</span> <span class="n">const</span> <span class="n">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">,</span> <span class="n">const</span> <span class="n">size_t</span> <span class="o">*</span><span class="n">argvlen</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">cmd</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span> <span class="sr">/* final command */</span>
+	    <span class="n">int</span> <span class="n">pos</span><span class="p">;</span> <span class="sr">/* position in final command */</span>
+	    <span class="n">size_t</span> <span class="n">len</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">totlen</span><span class="p">,</span> <span class="n">j</span><span class="p">;</span>
+	
+	    <span class="sr">/* Calculate number of bytes needed for the command */</span>
+	    <span class="n">totlen</span> <span class="o">=</span> <span class="mi">1</span><span class="o">+</span><span class="n">intlen</span><span class="p">(</span><span class="n">argc</span><span class="p">)</span><span class="o">+</span><span class="mi">2</span><span class="p">;</span>	<span class="sr">//</span><span class="mi">1</span><span class="err">长度表示开头</span><span class="o">*</span><span class="err">，</span><span class="mi">2</span><span class="err">表示</span> <span class="p">\</span><span class="n">r</span><span class="p">\</span><span class="n">n</span><span class="err">，再加上</span> <span class="n">argc</span> <span class="err">转换成字符串后的长度</span>
+	    <span class="k">for</span> <span class="p">(</span><span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">argc</span><span class="p">;</span> <span class="n">j</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">len</span> <span class="o">=</span> <span class="n">argvlen</span> <span class="p">?</span> <span class="n">argvlen</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="p">:</span> <span class="n">strlen</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">j</span><span class="p">]);</span>
+	        <span class="n">totlen</span> <span class="o">+=</span> <span class="n">bulklen</span><span class="p">(</span><span class="n">len</span><span class="p">);</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Build the command at protocol level */</span>
+	    <span class="n">cmd</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="n">totlen</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">cmd</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span>
+	        <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+	
+	    <span class="n">pos</span> <span class="o">=</span> <span class="nb">sprintf</span><span class="p">(</span><span class="n">cmd</span><span class="p">,</span><span class="s2">"*%d</span><span class="se">\r\n</span><span class="s2">"</span><span class="p">,</span><span class="n">argc</span><span class="p">);</span>
+	    <span class="k">for</span> <span class="p">(</span><span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">argc</span><span class="p">;</span> <span class="n">j</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">len</span> <span class="o">=</span> <span class="n">argvlen</span> <span class="p">?</span> <span class="n">argvlen</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="p">:</span> <span class="n">strlen</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">j</span><span class="p">]);</span>
+	        <span class="n">pos</span> <span class="o">+=</span> <span class="nb">sprintf</span><span class="p">(</span><span class="n">cmd</span><span class="o">+</span><span class="n">pos</span><span class="p">,</span><span class="s2">"$%zu</span><span class="se">\r\n</span><span class="s2">"</span><span class="p">,</span><span class="n">len</span><span class="p">);</span>
+	        <span class="n">memcpy</span><span class="p">(</span><span class="n">cmd</span><span class="o">+</span><span class="n">pos</span><span class="p">,</span><span class="n">argv</span><span class="p">[</span><span class="n">j</span><span class="p">],</span><span class="n">len</span><span class="p">);</span>
+	        <span class="n">pos</span> <span class="o">+=</span> <span class="n">len</span><span class="p">;</span>
+	        <span class="n">cmd</span><span class="p">[</span><span class="n">pos</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'\r'</span><span class="p">;</span>
+	        <span class="n">cmd</span><span class="p">[</span><span class="n">pos</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'\n'</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="n">assert</span><span class="p">(</span><span class="n">pos</span> <span class="o">==</span> <span class="n">totlen</span><span class="p">);</span>
+	    <span class="n">cmd</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'\0'</span><span class="p">;</span>
+	
+	    <span class="o">*</span><span class="n">target</span> <span class="o">=</span> <span class="n">cmd</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">totlen</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p><code class="highlighter-rouge">redisFormatCommandArgv</code> 函数是将客户端输入的命令按照 <code class="highlighter-rouge">redis protocol</code> 格式化，然后发送给服务器。比如 <code class="highlighter-rouge">SET NAME "redis"</code>，按照 <code class="highlighter-rouge">Redis protocol</code> 格式化成</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>*3\r\n$3\r\nSET\r\n$4\r\nNAME\r\n$5\r\nredis\r\n
+</code></pre></div></div>
+
+<p>每一个元素都是以 <code class="highlighter-rouge">\r\n</code> 分割，最前面 <code class="highlighter-rouge">*3</code> 表示该条命令有三个元素，后面 <code class="highlighter-rouge">$3</code> 表示当前元素的长度为3</p>

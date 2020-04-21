@@ -1,0 +1,623 @@
+<p>redis 对象浅析</p>
+
+<p>redis 中使用的主要数据结构有简单动态字符串(sds)、双向链表(linkedlist)、字典(dict)、压缩列表(ziplist)、整数集合(set)等，但是 redis 并没有直接使用这些结构，而是通过这些数据结构创建了一个对象系统，这个系统包含字符串对象、列表对象、哈希对象、集合对象和有序集合对象，而每种对象都使用了至少一种数据结构。</p>
+
+<h1 id="对象结构">对象结构</h1>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* A redis object, that is a type able to hold a string / list / set */
+
+/* The actual Redis Object */
+#define REDIS_LRU_BITS 24
+#define REDIS_LRU_CLOCK_MAX ((1&lt;&lt;REDIS_LRU_BITS)-1) /* Max value of obj-&gt;lru */
+#define REDIS_LRU_CLOCK_RESOLUTION 1000 /* LRU clock resolution in ms */
+typedef struct redisObject {
+    unsigned type:4;
+    unsigned encoding:4;
+    unsigned lru:REDIS_LRU_BITS; /* lru time (relative to server.lruclock) */
+    int refcount;
+    void *ptr;
+} robj;
+</code></pre></div></div>
+
+<p>redis 使用对象来表示数据库中的键和值，也就是说，每一个键值对，都至少有两个对象，一个对象表示键，一个表示值。这个结构体大小 <code class="highlighter-rouge">sizeof (robj)</code> 为12，因为前三个元素是位域，共32位，4个字节可以表示。</p>
+
+<p>redis 对象的结构如上所示，有五个成员： <br />
+<em><code class="highlighter-rouge">type</code></em>： 表示对象的类型，对应的是 redis 中的 <code class="highlighter-rouge">TYPE</code> 命令，在 redis 中，键总是一个字符串对象，而值可以使字符串对象、列表对象、哈希对象、集合对象或者有序集合对象中一种。</p>
+
+<p><code class="highlighter-rouge">encoding</code>： redis 的编码，这个属性，决定 ptr 指向对象的底层实现数据结构是什么数据结构。</p>
+
+<p><code class="highlighter-rouge">lru</code>： 可以理解为 <code class="highlighter-rouge">last recently used</code>，用于记录 redis 对象最后一次被命令程序访问的时间信息，可以用于计算数据库键的空转时长，即当前时间减去 <code class="highlighter-rouge">lru</code> 就是空转时长， redis 可以将空转时长大的键值对优先删除。</p>
+
+<p><code class="highlighter-rouge">refcount</code>： 对象的引用计数，redis 舒勇引用计数器的方法对对象进行管理，如果该值为0，就释放当前对象。</p>
+
+<p><code class="highlighter-rouge">ptr</code>： 对象指向的值，该值的数据结构有 <code class="highlighter-rouge">encoding</code> 编码决定。</p>
+
+<h2 id="对象的类型-type">对象的类型 (TYPE)</h2>
+<p>对象的 <code class="highlighter-rouge">TYPE</code> 属性记录了对象的类型。在 redis 客户端中，当使用 <code class="highlighter-rouge">TYPE</code> 命令查看某个键的类型时，服务器会根据对象的类型返回相应的值。 <br />
+<img src="https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/redis_TYPE.png" alt="type command" /> <br />
+那代码中， <code class="highlighter-rouge">TYPE</code> 命令有几个值呢</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Object types */
+#define REDIS_STRING 0		/* 字符串对象，返回 "string" */
+#define REDIS_LIST 1		/* 列表对象，返回 "list" */
+#define REDIS_SET 2			/* 集合对象，返回 "set" */
+#define REDIS_ZSET 3		/* 有序集合对象，返回 "zset" */
+#define REDIS_HASH 4		/* 哈希对象，返回 "hash" */
+</code></pre></div></div>
+
+<p>上面列出了对象的所有类型</p>
+
+<h2 id="对象的编码encoding">对象的编码(encoding)</h2>
+<p><code class="highlighter-rouge">encoding</code> 属性决定了对象的 ptr 指向的底层数据结构的实现，也就是说这个对象使用了什么数据结构作为底层实现。 redis 中的宏常量为</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Objects encoding. Some kind of objects like Strings and Hashes can be
+	 * internally represented in multiple ways. The 'encoding' field of the object
+	 * is set to one of this fields for this object. */</span>
+	<span class="c1">#define REDIS_ENCODING_RAW 0     /* Raw representation */</span>
+	<span class="c1">#define REDIS_ENCODING_INT 1     /* Encoded as integer */</span>
+	<span class="c1">#define REDIS_ENCODING_HT 2      /* Encoded as hash table */</span>
+	<span class="c1">#define REDIS_ENCODING_ZIPMAP 3  /* Encoded as zipmap */</span>
+	<span class="c1">#define REDIS_ENCODING_LINKEDLIST 4 /* Encoded as regular linked list */</span>
+	<span class="c1">#define REDIS_ENCODING_ZIPLIST 5 /* Encoded as ziplist */</span>
+	<span class="c1">#define REDIS_ENCODING_INTSET 6  /* Encoded as intset */</span>
+	<span class="c1">#define REDIS_ENCODING_SKIPLIST 7  /* Encoded as skiplist */</span>
+	<span class="c1">#define REDIS_ENCODING_EMBSTR 8  /* Embedded sds string encoding */</span></code></pre></figure>
+
+<p>每种类型的对象都至少使用了两种不同的编码。其中，字符串编码有 <code class="highlighter-rouge">REDIS_ENCODING_RAW</code> 和 <code class="highlighter-rouge">REDIS_ENCODING_EMBSTR</code> 两种，前者是普通的 sds 字符串对象，但是当字符串长度不超过39时， redis 为了节约内存，使用的是后面的字符串编码方式。</p>
+
+<p>在 redis 中，可以通过使用 <code class="highlighter-rouge">OBJECT ENCODING</code> 命令来查看键的编码方式</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* results of "object encoding" command */</span>
+	<span class="n">char</span> <span class="o">*</span><span class="n">strEncoding</span><span class="p">(</span><span class="n">int</span> <span class="n">encoding</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">switch</span><span class="p">(</span><span class="n">encoding</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="k">case</span> <span class="no">REDIS_ENCODING_RAW</span><span class="p">:</span> <span class="k">return</span> <span class="s2">"raw"</span><span class="p">;</span>
+	    <span class="k">case</span> <span class="no">REDIS_ENCODING_INT</span><span class="p">:</span> <span class="k">return</span> <span class="s2">"int"</span><span class="p">;</span>
+	    <span class="k">case</span> <span class="no">REDIS_ENCODING_HT</span><span class="p">:</span> <span class="k">return</span> <span class="s2">"hashtable"</span><span class="p">;</span>
+	    <span class="k">case</span> <span class="no">REDIS_ENCODING_LINKEDLIST</span><span class="p">:</span> <span class="k">return</span> <span class="s2">"linkedlist"</span><span class="p">;</span>
+	    <span class="k">case</span> <span class="no">REDIS_ENCODING_ZIPLIST</span><span class="p">:</span> <span class="k">return</span> <span class="s2">"ziplist"</span><span class="p">;</span>
+	    <span class="k">case</span> <span class="no">REDIS_ENCODING_INTSET</span><span class="p">:</span> <span class="k">return</span> <span class="s2">"intset"</span><span class="p">;</span>
+	    <span class="k">case</span> <span class="no">REDIS_ENCODING_SKIPLIST</span><span class="p">:</span> <span class="k">return</span> <span class="s2">"skiplist"</span><span class="p">;</span>
+	    <span class="k">case</span> <span class="no">REDIS_ENCODING_EMBSTR</span><span class="p">:</span> <span class="k">return</span> <span class="s2">"embstr"</span><span class="p">;</span>
+	    <span class="ss">default: </span><span class="k">return</span> <span class="s2">"unknown"</span><span class="p">;</span>
+	    <span class="p">}</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p><code class="highlighter-rouge">strEncoding</code> 函数返回了 <code class="highlighter-rouge">OBJECT ENCODING</code> 命令时的结果。</p>
+
+<p>通过 <code class="highlighter-rouge">encoding</code> 属性来设定对象所使用的编码，而不是为特定类型的对象关联一种固定的编码，极大的提升了 redis 的灵活性和效率。 redis 可以根据不同的使用场景来为对象设置不同的编码，从而可以优化对象在某一场景下的效率。因为列表的编码之间是可以转换的（不是任意转换）。比如： <br />
+当哈希对象所保存的元素比较少时，redis 使用压缩列表作为哈希对象的底层实现：</p>
+
+<ul>
+  <li>压缩列表比字典哈希更节约内存(字典通过拉链表解决冲突，一部分是通过单链表实现的)，且在内存中是以连续块的方式保存的，可以更快的加载到缓存中；</li>
+  <li>随着哈希对象元素的不断增加，使用压缩列表的方式保存元素的优势逐逐渐消失时，对象就将底层实现从压缩列表转向功能更强、更合适的字典哈希上。</li>
+</ul>
+
+<p>其他类型的对象也会使用多种不同的编码来进行类似的优化。</p>
+
+<h1 id="redis中不同的对象">redis中不同的对象</h1>
+<p>redis 中根据不同数据类型创建不同的对象，设置对象的类型，编码和ptr 指针，同时，将引用计数器 refcount 的值设置为1</p>
+
+<h2 id="字符串对象">字符串对象</h2>
+<p>字符串对象的类型 <code class="highlighter-rouge">TYPE</code> 为 <code class="highlighter-rouge">REDIS_STRING</code>，而编码可以为 int (<code class="highlighter-rouge">REDIS_ENCODING_INT</code>)、 raw (<code class="highlighter-rouge">REDIS_ENCODING_RAW</code>)和 embstr (<code class="highlighter-rouge">REDIS_ENCODING_EMBSTR</code>)。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">robj</span> <span class="o">*</span><span class="n">createObject</span><span class="p">(</span><span class="n">int</span> <span class="n">type</span><span class="p">,</span> <span class="n">void</span> <span class="o">*</span><span class="n">ptr</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span> <span class="o">=</span> <span class="n">zmalloc</span><span class="p">(</span><span class="n">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">o</span><span class="p">));</span>	<span class="sr">//</span> <span class="n">sizeof</span> <span class="p">(</span><span class="n">robj</span><span class="p">)</span> <span class="n">is</span> <span class="mi">12</span> <span class="n">bytes</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">type</span> <span class="o">=</span> <span class="n">type</span><span class="p">;</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">=</span> <span class="no">REDIS_ENCODING_RAW</span><span class="p">;</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">ptr</span> <span class="o">=</span> <span class="n">ptr</span><span class="p">;</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">refcount</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	
+	    <span class="sr">/* Set the LRU to the current lruclock (minutes resolution). */</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">lru</span> <span class="o">=</span> <span class="no">LRU_CLOCK</span><span class="p">();</span>
+	    <span class="k">return</span> <span class="n">o</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p><code class="highlighter-rouge">createObject</code> 函数就是创建一个字符串对象。如果对象保存的是一个字符串的值，同时这个字符串的长度大于39，那么对象将通过一个简单动态字符串(SDS)来保存这个值，并将编码设置为 raw。</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Create a string object with encoding REDIS_ENCODING_RAW, that is a plain
+ * string object where o-&gt;ptr points to a proper sds string. */
+robj *createRawStringObject(char *ptr, size_t len) {
+    return createObject(REDIS_STRING,sdsnewlen(ptr,len));
+}
+</code></pre></div></div>
+
+<p>其结构如下所示: <br />
+<img src="https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/sds-object.png" alt="sds object" />
+当对象保存的值是整数时，将字符串的编码设置为<code class="highlighter-rouge">REDIS_ENCODING_INT</code>，同时将整数值保存在字符串对象结构的 ptr 里面</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">robj</span> <span class="o">*</span><span class="n">createStringObjectFromLongLong</span><span class="p">(</span><span class="n">long</span> <span class="n">long</span> <span class="n">value</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span><span class="p">;</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">value</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">value</span> <span class="o">&lt;</span> <span class="no">REDIS_SHARED_INTEGERS</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">incrRefCount</span><span class="p">(</span><span class="n">shared</span><span class="p">.</span><span class="nf">integers</span><span class="p">[</span><span class="n">value</span><span class="p">]);</span>	<span class="sr">//</span> <span class="err">引用计数器，如果整数在</span> <span class="mi">0</span> <span class="o">-</span> <span class="mi">10000</span><span class="err">范围内，不需要再创建对象，只需要将对应的引用计数器加</span><span class="mi">1</span><span class="err">，后面在详细讨论</span>
+	        <span class="n">o</span> <span class="o">=</span> <span class="n">shared</span><span class="p">.</span><span class="nf">integers</span><span class="p">[</span><span class="n">value</span><span class="p">];</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">value</span> <span class="o">&gt;=</span> <span class="no">LONG_MIN</span> <span class="o">&amp;&amp;</span> <span class="n">value</span> <span class="o">&lt;=</span> <span class="no">LONG_MAX</span><span class="p">)</span> 
+	            <span class="n">o</span> <span class="o">=</span> <span class="n">createObject</span><span class="p">(</span><span class="no">REDIS_STRING</span><span class="p">,</span> <span class="no">NULL</span><span class="p">);</span>
+	            <span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">=</span> <span class="no">REDIS_ENCODING_INT</span><span class="p">;</span>
+	            <span class="n">o</span><span class="o">-&gt;</span><span class="n">ptr</span> <span class="o">=</span> <span class="p">(</span><span class="n">void</span><span class="o">*</span><span class="p">)((</span><span class="n">long</span><span class="p">)</span><span class="n">value</span><span class="p">);</span>	<span class="sr">//</span><span class="err">转成</span> <span class="n">void</span><span class="o">*</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>	<span class="sr">//</span> <span class="err">超出范围，将数字转成字符串存储</span>
+	            <span class="n">o</span> <span class="o">=</span> <span class="n">createObject</span><span class="p">(</span><span class="no">REDIS_STRING</span><span class="p">,</span><span class="n">sdsfromlonglong</span><span class="p">(</span><span class="n">value</span><span class="p">));</span>	<span class="sr">//</span><span class="n">convert</span> <span class="n">long</span> <span class="n">long</span> <span class="n">to</span> <span class="n">string</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="n">o</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>如果对象保存的是字符串，且字符串的长度小于39时， redis 为了节约内存，使用另一种字符串的存储方式 embstr，创建字符串对象。</p>
+
+<p>embstr 编码是专门用于保存短字符串的一种优化编码结构，这种编码与 raw 一样，都是用 redisObject 结构和 sdshdr 结构来表示字符串对象，但是 raw 编码在通过调用 <code class="highlighter-rouge">createRawStringObject</code> 函数时，需要调用两次内存分配，先通过 sdsnew 创建 sds ，然后在通过 <code class="highlighter-rouge">createObject</code> 创建字符串对象 redisObject，而 embstr 编码只需要一次内存分配。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Create a string object with encoding REDIS_ENCODING_EMBSTR, that is
+	 * an object where the sds string is actually an unmodifiable string
+	 * allocated in the same chunk as the object itself. */</span>
+	<span class="n">robj</span> <span class="o">*</span><span class="n">createEmbeddedStringObject</span><span class="p">(</span><span class="n">char</span> <span class="o">*</span><span class="n">ptr</span><span class="p">,</span> <span class="n">size_t</span> <span class="n">len</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span> <span class="o">=</span> <span class="n">zmalloc</span><span class="p">(</span><span class="n">sizeof</span><span class="p">(</span><span class="n">robj</span><span class="p">)</span><span class="o">+</span><span class="n">sizeof</span><span class="p">(</span><span class="n">struct</span> <span class="n">sdshdr</span><span class="p">)</span><span class="o">+</span><span class="n">len</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>
+	    <span class="n">struct</span> <span class="n">sdshdr</span> <span class="o">*</span><span class="n">sh</span> <span class="o">=</span> <span class="p">(</span><span class="n">void</span><span class="o">*</span><span class="p">)(</span><span class="n">o</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>	<span class="sr">//</span><span class="err">申请的是连续空间，</span><span class="n">sh</span><span class="err">指向了</span><span class="n">sdshdr</span><span class="err">，跳过了</span><span class="n">robj</span>
+	
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">type</span> <span class="o">=</span> <span class="no">REDIS_STRING</span><span class="p">;</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">=</span> <span class="no">REDIS_ENCODING_EMBSTR</span><span class="p">;</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">ptr</span> <span class="o">=</span> <span class="n">sh</span><span class="o">+</span><span class="mi">1</span><span class="p">;</span>	<span class="sr">//</span> <span class="n">sdshdr</span> <span class="err">中</span> <span class="n">buf</span> <span class="err">是可变长数组，</span><span class="n">sizeof</span> <span class="p">(</span><span class="n">sdshdr</span><span class="p">)</span> <span class="n">is</span> <span class="mi">8</span> <span class="n">bytes</span><span class="err">，此时，</span><span class="n">ptr</span> <span class="err">刚好指向的就是</span> <span class="n">buf</span><span class="p">,</span><span class="err">申请的连续内存，后面对</span><span class="n">buf</span><span class="err">赋值</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">refcount</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">lru</span> <span class="o">=</span> <span class="no">LRU_CLOCK</span><span class="p">();</span>
+	
+	    <span class="n">sh</span><span class="o">-&gt;</span><span class="n">len</span> <span class="o">=</span> <span class="n">len</span><span class="p">;</span>
+	    <span class="n">sh</span><span class="o">-&gt;</span><span class="n">free</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">ptr</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">memcpy</span><span class="p">(</span><span class="n">sh</span><span class="o">-&gt;</span><span class="n">buf</span><span class="p">,</span><span class="n">ptr</span><span class="p">,</span><span class="n">len</span><span class="p">);</span>
+	        <span class="n">sh</span><span class="o">-&gt;</span><span class="n">buf</span><span class="p">[</span><span class="n">len</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'\0'</span><span class="p">;</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="n">memset</span><span class="p">(</span><span class="n">sh</span><span class="o">-&gt;</span><span class="n">buf</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="n">len</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="n">o</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>embstr 编码通过一次内存分配申请一块连续的内存空间，包括 redisObject 和 sdshdr</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr)+len+1);
+</code></pre></div></div>
+
+<p>然后获取 sdshdr 在这个连续空间出的位置</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>struct sdshdr *sh = (void*)(o+1);
+</code></pre></div></div>
+
+<p>将 <code class="highlighter-rouge">TYPE</code> 设置为 <code class="highlighter-rouge">REDIS_STRING</code>，<code class="highlighter-rouge">encoding</code> 设置为 <code class="highlighter-rouge">REDIS_ENCODING_EMBSTR</code>，因为是连续的内存块，通过 sdshdr 结构体的说明可知， <code class="highlighter-rouge">sizeof (sdshdr)</code> 的大小为8，成员 buf 是可变长数组，是不能通过<code class="highlighter-rouge">sizeof</code> 计算长度的，所以获取 sdshdr 的地址 sh 后，往后便宜 <code class="highlighter-rouge">sizeof (sdshdr)</code> 的大小就是 buf 字符串的值。</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>o-&gt;ptr = sh+1;
+</code></pre></div></div>
+
+<p>其结构如下所示 <br />
+<img src="https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/embstr-object.png" alt="embstr object" /></p>
+
+<p>使用 embstr 编码保存字符串的优点：<br /></p>
+
+<ul>
+  <li>embstr 创建字符串对象时比 raw 编码创建对象少分进行一次内存分配</li>
+  <li>释放时，同样，embstr 只需释放一次，raw 需要释放两次</li>
+  <li>embstr 编码将字符串对象保存在一块连续的内存空间中，它比 raw 编码的字符串能够更快的加载到缓存，能够更好的利用缓存带来的优势。</li>
+</ul>
+
+<p>long double 类型的浮点数，在 redis 中也是作为字符串的值来保存的。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Create a string object from a long double. If humanfriendly is non-zero
+	 * it does not use exponential format and trims trailing zeroes at the end,
+	 * however this results in loss of precision. Otherwise exp format is used
+	 * and the output of snprintf() is not modified.
+	 *
+	 * The 'humanfriendly' option is used for INCRBYFLOAT and HINCRBYFLOAT. */</span>
+	<span class="n">robj</span> <span class="o">*</span><span class="n">createStringObjectFromLongDouble</span><span class="p">(</span><span class="n">long</span> <span class="n">double</span> <span class="n">value</span><span class="p">,</span> <span class="n">int</span> <span class="n">humanfriendly</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">char</span> <span class="n">buf</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span>
+	    <span class="n">int</span> <span class="n">len</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">isinf</span><span class="p">(</span><span class="n">value</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="sr">/* Libc in odd systems (Hi Solaris!) will format infinite in a
+	         * different way, so better to handle it in an explicit way. */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">value</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">memcpy</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="s2">"inf"</span><span class="p">,</span><span class="mi">3</span><span class="p">);</span>
+	            <span class="n">len</span> <span class="o">=</span> <span class="mi">3</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">memcpy</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="s2">"-inf"</span><span class="p">,</span><span class="mi">4</span><span class="p">);</span>
+	            <span class="n">len</span> <span class="o">=</span> <span class="mi">4</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">humanfriendly</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="sr">/* We use 17 digits precision since with 128 bit floats that precision
+	         * after rounding is able to represent most small decimal numbers in a
+	         * way that is "non surprising" for the user (that is, most small
+	         * decimal numbers will be represented in a way that when converted
+	         * back into a string are exactly the same as what the user typed.) */</span>
+	        <span class="n">len</span> <span class="o">=</span> <span class="n">snprintf</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="n">sizeof</span><span class="p">(</span><span class="n">buf</span><span class="p">),</span><span class="s2">"%.17Lf"</span><span class="p">,</span> <span class="n">value</span><span class="p">);</span>
+	        <span class="sr">/* Now remove trailing zeroes after the '.' */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">strchr</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="s1">'.'</span><span class="p">)</span> <span class="o">!=</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">char</span> <span class="o">*</span><span class="nb">p</span> <span class="o">=</span> <span class="n">buf</span><span class="o">+</span><span class="n">len</span><span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+	            <span class="k">while</span><span class="p">(</span><span class="o">*</span><span class="nb">p</span> <span class="o">==</span> <span class="s1">'0'</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="nb">p</span><span class="o">--</span><span class="p">;</span>
+	                <span class="n">len</span><span class="o">--</span><span class="p">;</span>
+	            <span class="p">}</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="o">*</span><span class="nb">p</span> <span class="o">==</span> <span class="s1">'.'</span><span class="p">)</span> <span class="n">len</span><span class="o">--</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="n">len</span> <span class="o">=</span> <span class="n">snprintf</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="n">sizeof</span><span class="p">(</span><span class="n">buf</span><span class="p">),</span><span class="s2">"%.17Lg"</span><span class="p">,</span> <span class="n">value</span><span class="p">);</span>	<span class="sr">//</span><span class="err">将浮点数转变成字符串，保留</span><span class="mi">17</span><span class="err">位小数</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="n">createStringObject</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="n">len</span><span class="p">);</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>将浮点数通过 <code class="highlighter-rouge">snprintf</code> 的方法转成字符串，保留17为小数，如果需要可读性好，将小数点后的最后一个非0数字后的0全部去掉，但是这样会降低精度。</p>
+
+<p>如果需要对保存到 redis 中的浮点数进行操作，比如加上或者减去某个值， redis 会先将字符串转成浮点数，计算后在转成字符串保存在 redis 中</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">int</span> <span class="n">getLongDoubleFromObject</span><span class="p">(</span><span class="n">robj</span> <span class="o">*</span><span class="n">o</span><span class="p">,</span> <span class="n">long</span> <span class="n">double</span> <span class="o">*</span><span class="n">target</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">long</span> <span class="n">double</span> <span class="n">value</span><span class="p">;</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">eptr</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">o</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">value</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="n">redisAssertWithInfo</span><span class="p">(</span><span class="no">NULL</span><span class="p">,</span><span class="n">o</span><span class="p">,</span><span class="n">o</span><span class="o">-&gt;</span><span class="n">type</span> <span class="o">==</span> <span class="no">REDIS_STRING</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">sdsEncodedObject</span><span class="p">(</span><span class="n">o</span><span class="p">))</span> <span class="p">{</span>
+	            <span class="n">errno</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	            <span class="n">value</span> <span class="o">=</span> <span class="n">strtold</span><span class="p">(</span><span class="n">o</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">eptr</span><span class="p">);</span>	<span class="sr">//</span> <span class="n">convert</span> <span class="n">string</span> <span class="n">to</span> <span class="n">long</span> <span class="n">double</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">isspace</span><span class="p">(((</span><span class="n">char</span><span class="o">*</span><span class="p">)</span><span class="n">o</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">)[</span><span class="mi">0</span><span class="p">])</span> <span class="o">||</span> <span class="n">eptr</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">!=</span> <span class="s1">'\0'</span> <span class="o">||</span>
+	                <span class="n">errno</span> <span class="o">==</span> <span class="no">ERANGE</span> <span class="o">||</span> <span class="n">isnan</span><span class="p">(</span><span class="n">value</span><span class="p">))</span>
+	                <span class="k">return</span> <span class="no">REDIS_ERR</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">==</span> <span class="no">REDIS_ENCODING_INT</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">value</span> <span class="o">=</span> <span class="p">(</span><span class="n">long</span><span class="p">)</span><span class="n">o</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">redisPanic</span><span class="p">(</span><span class="s2">"Unknown string encoding"</span><span class="p">);</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	    <span class="o">*</span><span class="n">target</span> <span class="o">=</span> <span class="n">value</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="no">REDIS_OK</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<h3 id="编码的转换">编码的转换</h3>
+<p>字符串对象中，int 编码和 embstr 编码在一定条件下可以转换成 raw 编码。</p>
+
+<p>对于 int 编码对象，如果在 redis 中，对该对象进行操作，比如 append 一个字符串，是的该对象的值不在保存的是整数值，而是字符串时，该对象的编码将变成的 raw (<code class="highlighter-rouge">REDIS_ENCODING_RAW</code>)</p>
+
+<p>对与 embstr 编码对象，因为 redis 没有为 embstr 编码的字符串编写任何相应的修改程序(只有 int 编码和 raw 编码的字符串对象才有)，所以 embstr　编码的字符串对象实际上是只读的。当需要修改　embstr 编码的对象时， redis 首先将该对象的编码从 embstr 转换成 raw，然后再进行修改。所以，embstr 编码的字符串对象，在修改之后，总是编程 raw 编码的字符串对象。</p>
+
+<h2 id="其他对象">其他对象</h2>
+<p>下面分别是创建双向链表对象、压缩列表对象、集合对象、整数集合对象、有序集合对象、哈希对象和有序集合压缩列表对象。后续在深入分析这些代码时，在分别对这些对象的结构、编码转换等做详细的分析。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">robj</span> <span class="o">*</span><span class="n">createListObject</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">list</span> <span class="o">*</span><span class="n">l</span> <span class="o">=</span> <span class="n">listCreate</span><span class="p">();</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span> <span class="o">=</span> <span class="n">createObject</span><span class="p">(</span><span class="no">REDIS_LIST</span><span class="p">,</span><span class="n">l</span><span class="p">);</span>
+	    <span class="n">listSetFreeMethod</span><span class="p">(</span><span class="n">l</span><span class="p">,</span><span class="n">decrRefCountVoid</span><span class="p">);</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">=</span> <span class="no">REDIS_ENCODING_LINKEDLIST</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">o</span><span class="p">;</span>
+	<span class="p">}</span>
+	
+	<span class="n">robj</span> <span class="o">*</span><span class="n">createZiplistObject</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">unsigned</span> <span class="n">char</span> <span class="o">*</span><span class="n">zl</span> <span class="o">=</span> <span class="n">ziplistNew</span><span class="p">();</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span> <span class="o">=</span> <span class="n">createObject</span><span class="p">(</span><span class="no">REDIS_LIST</span><span class="p">,</span><span class="n">zl</span><span class="p">);</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">=</span> <span class="no">REDIS_ENCODING_ZIPLIST</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">o</span><span class="p">;</span>
+	<span class="p">}</span>
+	
+	<span class="n">robj</span> <span class="o">*</span><span class="n">createSetObject</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">dict</span> <span class="o">*</span><span class="n">d</span> <span class="o">=</span> <span class="n">dictCreate</span><span class="p">(</span><span class="o">&amp;</span><span class="n">setDictType</span><span class="p">,</span><span class="no">NULL</span><span class="p">);</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span> <span class="o">=</span> <span class="n">createObject</span><span class="p">(</span><span class="no">REDIS_SET</span><span class="p">,</span><span class="n">d</span><span class="p">);</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">=</span> <span class="no">REDIS_ENCODING_HT</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">o</span><span class="p">;</span>
+	<span class="p">}</span>
+	
+	<span class="n">robj</span> <span class="o">*</span><span class="n">createIntsetObject</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">intset</span> <span class="o">*</span><span class="n">is</span> <span class="o">=</span> <span class="n">intsetNew</span><span class="p">();</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span> <span class="o">=</span> <span class="n">createObject</span><span class="p">(</span><span class="no">REDIS_SET</span><span class="p">,</span><span class="n">is</span><span class="p">);</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">=</span> <span class="no">REDIS_ENCODING_INTSET</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">o</span><span class="p">;</span>
+	<span class="p">}</span>
+	
+	<span class="n">robj</span> <span class="o">*</span><span class="n">createHashObject</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">unsigned</span> <span class="n">char</span> <span class="o">*</span><span class="n">zl</span> <span class="o">=</span> <span class="n">ziplistNew</span><span class="p">();</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span> <span class="o">=</span> <span class="n">createObject</span><span class="p">(</span><span class="no">REDIS_HASH</span><span class="p">,</span> <span class="n">zl</span><span class="p">);</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">=</span> <span class="no">REDIS_ENCODING_ZIPLIST</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">o</span><span class="p">;</span>
+	<span class="p">}</span>
+	
+	<span class="n">robj</span> <span class="o">*</span><span class="n">createZsetObject</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">zset</span> <span class="o">*</span><span class="n">zs</span> <span class="o">=</span> <span class="n">zmalloc</span><span class="p">(</span><span class="n">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">zs</span><span class="p">));</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span><span class="p">;</span>
+	
+	    <span class="n">zs</span><span class="o">-&gt;</span><span class="n">dict</span> <span class="o">=</span> <span class="n">dictCreate</span><span class="p">(</span><span class="o">&amp;</span><span class="n">zsetDictType</span><span class="p">,</span><span class="no">NULL</span><span class="p">);</span>
+	    <span class="n">zs</span><span class="o">-&gt;</span><span class="n">zsl</span> <span class="o">=</span> <span class="n">zslCreate</span><span class="p">();</span>
+	    <span class="n">o</span> <span class="o">=</span> <span class="n">createObject</span><span class="p">(</span><span class="no">REDIS_ZSET</span><span class="p">,</span><span class="n">zs</span><span class="p">);</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">=</span> <span class="no">REDIS_ENCODING_SKIPLIST</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">o</span><span class="p">;</span>
+	<span class="p">}</span>
+	
+	<span class="n">robj</span> <span class="o">*</span><span class="n">createZsetZiplistObject</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">unsigned</span> <span class="n">char</span> <span class="o">*</span><span class="n">zl</span> <span class="o">=</span> <span class="n">ziplistNew</span><span class="p">();</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span> <span class="o">=</span> <span class="n">createObject</span><span class="p">(</span><span class="no">REDIS_ZSET</span><span class="p">,</span><span class="n">zl</span><span class="p">);</span>
+	    <span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">=</span> <span class="no">REDIS_ENCODING_ZIPLIST</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">o</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<h2 id="类型检查">类型检查</h2>
+<p>redis 中用于操作键的命令可分为两种，一种可以对任何类型的键进行操作，比如  DEL、EXPIRE、RENAME、TYPE、OBJECT 等，另一种只能对特定类型的键执行，比如 SET、GET、APPEND、STRLEN 只能对字符串键执行，而 RPUSH、HSET、HGET、HLEN 只能对列表键执行，如果用 SET 对列表键执行，redis 将返回一个错误。</p>
+
+<p>为了确保指定的键能够执行某些特定的命令，redis 在执行命令前会先检查输入键的类型是否正确，然后再决定是否执行给定的命令。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">int</span> <span class="n">checkType</span><span class="p">(</span><span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span><span class="p">,</span> <span class="n">robj</span> <span class="o">*</span><span class="n">o</span><span class="p">,</span> <span class="n">int</span> <span class="n">type</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">o</span><span class="o">-&gt;</span><span class="n">type</span> <span class="o">!=</span> <span class="n">type</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">addReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">shared</span><span class="p">.</span><span class="nf">wrongtypeerr</span><span class="p">);</span>	<span class="sr">//</span><span class="n">wrong_type_err</span>
+	        <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>通过 redisObject 的 <code class="highlighter-rouge">TYPE</code> 属性来判断类型是否正确： <br /></p>
+
+<ul>
+  <li>在执行一个特定的命令之前，服务器会先检查输入数据库键的值对象是否为执行命令所需的类型，如果是，才会执行指定的命令</li>
+  <li>否则，服务器将拒绝执行命令，并返回一个错误</li>
+</ul>
+
+<h2 id="多态命令的实现">多态命令的实现</h2>
+<p>redis 除了根据对象的 <code class="highlighter-rouge">TYPE</code> 属性判断键能否执行指定的命令之外，还需要根据编码属性 <code class="highlighter-rouge">encoding</code> 来选择正确的命令实现代码执行命令（因为通常一种对象因为优化的原因可以有不同的编码方式）。</p>
+
+<p>比如列表对象，可以有 linkedlist(<code class="highlighter-rouge">REDIS_ENCODING_LINEDLIST</code>) 和 ziplist(<code class="highlighter-rouge">REDIS_ENCODING_ZIPLIST</code>) 两个编码方式，但是，在执行 LLEN 命令时，redis 出了需要判断 <code class="highlighter-rouge">TYPE</code> 是否是 <code class="highlighter-rouge">REDIS_LIST</code> 外，还需要根据编码判断是 <code class="highlighter-rouge">linkedlist</code> 还是 <code class="highlighter-rouge">ziplist</code>，然后才能使用双向链表的 API 还是 ziplist 的 API 执行相应的函数获取长度。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">void</span> <span class="n">llenCommand</span><span class="p">(</span><span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span> <span class="o">=</span> <span class="n">lookupKeyReadOrReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span><span class="n">shared</span><span class="p">.</span><span class="nf">czero</span><span class="p">);</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">o</span> <span class="o">==</span> <span class="no">NULL</span> <span class="o">||</span> <span class="n">checkType</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">o</span><span class="p">,</span><span class="no">REDIS_LIST</span><span class="p">))</span> <span class="k">return</span><span class="p">;</span>
+	    <span class="n">addReplyLongLong</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">listTypeLength</span><span class="p">(</span><span class="n">o</span><span class="p">));</span>
+	<span class="p">}</span>
+	
+	<span class="n">unsigned</span> <span class="n">long</span> <span class="n">listTypeLength</span><span class="p">(</span><span class="n">robj</span> <span class="o">*</span><span class="n">subject</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">subject</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">==</span> <span class="no">REDIS_ENCODING_ZIPLIST</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">return</span> <span class="n">ziplistLen</span><span class="p">(</span><span class="n">subject</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">);</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">subject</span><span class="o">-&gt;</span><span class="n">encoding</span> <span class="o">==</span> <span class="no">REDIS_ENCODING_LINKEDLIST</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">return</span> <span class="n">listLength</span><span class="p">((</span><span class="n">list</span><span class="o">*</span><span class="p">)</span><span class="n">subject</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">);</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="n">redisPanic</span><span class="p">(</span><span class="s2">"Unknown list encoding"</span><span class="p">);</span>
+	    <span class="p">}</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>上面两个函数展示了 LLEN 的求取过程。</p>
+
+<p>借用面向对象的术语，我们可以认为 LLEN 命令时多态的，只要执行 LLEN，不管是对象的编码方式是 linkedlist 还是 ziplist ，都可以得到列表对象的长度。
+(就像 the progmatic programmer 中所说，思想的“异花授粉”(cross-pollination)，当你熟悉面向对象时，可以使用不同的方式编写纯c，加入面向对象的思想)。</p>
+
+<p>而相对于特征类型的特定命令，DEL、EXPIRE、TYPE、OBJECT等这些命令可以同时处理多种不同类型的键，前者是基于编码的多态，后者是基于类型的多态。</p>
+
+<h2 id="内存技术器-refcount">内存技术器 refcount</h2>
+<p>C语言没有内存回收功能，所以 redis 在自己的对象系统中，构建了一个内存计数器 (reference counting) 技术实现内存回收功能。通过这一机制，程序可以通过跟踪对象的引用计数信息，当 refcount 为 0 时释放对象回收内存。</p>
+
+<p>在 redisObject 对象中有一个 refcount 属性，该属性记录的就是对象的引用计数信息。对象的引用计数信息会随着对象的状态变化而不断变化。</p>
+
+<ul>
+  <li>创建新对象时，引用计数器设置为1</li>
+  <li>当对象被新程序使用时，引用计数值加1 (<code class="highlighter-rouge">incrRefCount</code>)</li>
+  <li>当对象不再被新程序使用时，引用计数减1 (<code class="highlighter-rouge">decrRefCount</code>)</li>
+  <li>当对象的引用计数为0时，释放对象</li>
+</ul>
+
+<hr />
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>void decrRefCount(robj *o) {
+    if (o-&gt;refcount &lt;= 0) redisPanic("decrRefCount against refcount &lt;= 0");
+    if (o-&gt;refcount == 1) {
+        switch(o-&gt;type) {
+        case REDIS_STRING: freeStringObject(o); break;
+        case REDIS_LIST: freeListObject(o); break;
+        case REDIS_SET: freeSetObject(o); break;
+        case REDIS_ZSET: freeZsetObject(o); break;
+        case REDIS_HASH: freeHashObject(o); break;
+        default: redisPanic("Unknown object type"); break;
+        }
+        zfree(o);
+    } else {
+        o-&gt;refcount--;
+    }
+}
+</code></pre></div></div>
+
+<h2 id="对象共享">对象共享</h2>
+<p>不知道大家还记不记得，上面的字符串对象中，当编码方式为int (<code class="highlighter-rouge">REDIS_ENCODING_INT</code>)时，对象的创建函数 <code class="highlighter-rouge">createStringObjectFromLongLong</code>，当整数值在 0 - 10000的范围内时，不会新创建一个字符串对象，而是将 shared 这个共享对象中的 intergers 这个 redisObject 对象数组中对应的元素添加一个指向该元素的引用，同时将该元素是引用计数加1。</p>
+
+<p>shared 是一个全局变量，用于共享</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>* Our shared "common" objects */
+
+struct sharedObjectsStruct shared;
+</code></pre></div></div>
+
+<p>在 <code class="highlighter-rouge">createSharedObject</code> 函数中创建和初始化，其中，对 intergers 数组初始化如下</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>for (j = 0; j &lt; REDIS_SHARED_INTEGERS; j++) {
+        shared.integers[j] = createObject(REDIS_STRING,(void*)(long)j);
+        shared.integers[j]-&gt;encoding = REDIS_ENCODING_INT;
+}
+</code></pre></div></div>
+
+<p>其中，<code class="highlighter-rouge">REDIS_SHARED_INTEGERS</code> 这个常量为 10000，<strong>可以通过修改这个值，来改变共享整数对象的范围。</strong></p>
+
+<p>redis的引用计数机制，实现的共享对象的方法，能够极大的节约内存，所引用的对象，出了引用计数进行了加1之外，其他属性都没有发生改变。数据库中保存的相同值对象越多，就越能节约内存。</p>
+
+<p>在 redis 中，不仅只有字符串对象能够使用这些共享对象，在数据结构中嵌套了字符串对象的其他对象，都可以使用这些共享对象（redis 中目前只能嵌套字符串对象）。</p>
+
+<blockquote>
+  <p>在 redis 中，考虑到时间复杂度和CPU时间的限制，只共享保存整数值的字符串对象，这是因为，在决定共享对象能够被其他对象直接使用时，redis 需要保证共享对象与目标对象时完全相同的，只有保存整数值的字符串对象才是最简单的，复杂度最低，而保存的值越复杂，验证共享对象和目标对象是否相同所需的复杂度就越高，消耗CPU的时间就越多。</p>
+</blockquote>
+
+<h3 id="对象的空转时长">对象的空转时长</h3>
+<p>redisObject 中 <code class="highlighter-rouge">lru</code> 属性，记录的就是对象的访问时间信息，根据该信息就能够计算出对象的空转时长。</p>
+
+<p><code class="highlighter-rouge">OBJECT IDLETIME</code> 命令可以打印兑现的空转时长，这是通过将当前时间减去键的值对象的 lru 的时间计算得出的。</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Given an object returns the min number of milliseconds the object was never
+ * requested, using an approximated LRU algorithm. */
+unsigned long long estimateObjectIdleTime(robj *o) {
+    unsigned long long lruclock = LRU_CLOCK();
+    if (lruclock &gt;= o-&gt;lru) {
+        return (lruclock - o-&gt;lru) * REDIS_LRU_CLOCK_RESOLUTION;
+    } else {
+        return (lruclock + (REDIS_LRU_CLOCK_MAX - o-&gt;lru)) *
+                    REDIS_LRU_CLOCK_RESOLUTION;
+    }
+}
+</code></pre></div></div>
+
+<p><code class="highlighter-rouge">OBJECT IDLTTIME</code> 这个命令不会改变对象的 lru 属性，像 GET、SET等命令都会改变对象的 lru 属性</p>
+
+<p>键的空转时长还有另外一个作用，就是如果服务器打开了 <code class="highlighter-rouge">maxmemory</code> 选项，并且服务器的回收内存算法为 <code class="highlighter-rouge">volatile-lru</code> 或者 <code class="highlighter-rouge">allkeys-lru</code>，那么当服务器的内存数超过 <code class="highlighter-rouge">maxmemory</code> 时，空转时长较高的那部分键会被服务器优先释放，回收内存。</p>
+
+<hr />
+<h2 id="其他">其他</h2>
+<h3 id="object的命令实现">OBJECT的命令实现</h3>
+<p><code class="highlighter-rouge">OBJECT</code> 的三种命令</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Object command allows to inspect the internals of an Redis Object.
+	 * Usage: OBJECT &lt;refcount|encoding|idletime&gt; &lt;key&gt; */</span>
+	<span class="n">void</span> <span class="n">objectCommand</span><span class="p">(</span><span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcasecmp</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span><span class="s2">"refcount"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span> <span class="o">==</span> <span class="mi">3</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">((</span><span class="n">o</span> <span class="o">=</span> <span class="n">objectCommandLookupOrReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span><span class="n">shared</span><span class="p">.</span><span class="nf">nullbulk</span><span class="p">))</span>
+	                <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="k">return</span><span class="p">;</span>
+	        <span class="n">addReplyLongLong</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">o</span><span class="o">-&gt;</span><span class="n">refcount</span><span class="p">);</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcasecmp</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span><span class="s2">"encoding"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span> <span class="o">==</span> <span class="mi">3</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">((</span><span class="n">o</span> <span class="o">=</span> <span class="n">objectCommandLookupOrReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span><span class="n">shared</span><span class="p">.</span><span class="nf">nullbulk</span><span class="p">))</span>
+	                <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="k">return</span><span class="p">;</span>
+	        <span class="n">addReplyBulkCString</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">strEncoding</span><span class="p">(</span><span class="n">o</span><span class="o">-&gt;</span><span class="n">encoding</span><span class="p">));</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcasecmp</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">,</span><span class="s2">"idletime"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span> <span class="o">==</span> <span class="mi">3</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">((</span><span class="n">o</span> <span class="o">=</span> <span class="n">objectCommandLookupOrReply</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span><span class="n">shared</span><span class="p">.</span><span class="nf">nullbulk</span><span class="p">))</span>
+	                <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="k">return</span><span class="p">;</span>
+	        <span class="n">addReplyLongLong</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">estimateObjectIdleTime</span><span class="p">(</span><span class="n">o</span><span class="p">)</span><span class="o">/</span><span class="mi">1000</span><span class="p">);</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="n">addReplyError</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="s2">"Syntax error. Try OBJECT (refcount|encoding|idletime)"</span><span class="p">);</span>
+	    <span class="p">}</span>
+	<span class="p">}</span></code></pre></figure>
+
+<h3 id="redis中将字符串转与long-long的巧妙转换">redis中将字符串转与long long的巧妙转换</h3>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Convert a long long into a string. Returns the number of
+	 * characters needed to represent the number.
+	 * If the buffer is not big enough to store the string, 0 is returned.
+	 *
+	 * Based on the following article (that apparently does not provide a
+	 * novel approach but only publicizes an already used technique):
+	 *
+	 * https:/</span><span class="o">/</span><span class="n">www</span><span class="p">.</span><span class="nf">facebook</span><span class="p">.</span><span class="nf">com</span><span class="o">/</span><span class="n">notes</span><span class="o">/</span><span class="n">facebook</span><span class="o">-</span><span class="n">engineering</span><span class="o">/</span><span class="n">three</span><span class="o">-</span><span class="n">optimization</span><span class="o">-</span><span class="n">tips</span><span class="o">-</span><span class="k">for</span><span class="o">-</span><span class="n">c</span><span class="o">/</span><span class="mi">10151361643253920</span>
+	 <span class="o">*</span>
+	 <span class="o">*</span> <span class="no">Modified</span> <span class="k">in</span> <span class="n">order</span> <span class="n">to</span> <span class="n">handle</span> <span class="n">signed</span> <span class="n">integers</span> <span class="n">since</span> <span class="n">the</span> <span class="n">original</span> <span class="n">code</span> <span class="n">was</span>
+	 <span class="o">*</span> <span class="n">designed</span> <span class="k">for</span> <span class="n">unsigned</span> <span class="n">integers</span><span class="p">.</span> <span class="nf">*</span><span class="o">/</span>
+	<span class="n">int</span> <span class="n">ll2string</span><span class="p">(</span><span class="n">char</span><span class="o">*</span> <span class="n">dst</span><span class="p">,</span> <span class="n">size_t</span> <span class="n">dstlen</span><span class="p">,</span> <span class="n">long</span> <span class="n">long</span> <span class="n">svalue</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">static</span> <span class="n">const</span> <span class="n">char</span> <span class="n">digits</span><span class="p">[</span><span class="mi">201</span><span class="p">]</span> <span class="o">=</span>
+	        <span class="s2">"0001020304050607080910111213141516171819"</span>
+	        <span class="s2">"2021222324252627282930313233343536373839"</span>
+	        <span class="s2">"4041424344454647484950515253545556575859"</span>
+	        <span class="s2">"6061626364656667686970717273747576777879"</span>
+	        <span class="s2">"8081828384858687888990919293949596979899"</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">negative</span><span class="p">;</span>
+	    <span class="n">unsigned</span> <span class="n">long</span> <span class="n">long</span> <span class="n">value</span><span class="p">;</span>
+	
+	    <span class="sr">/* The main loop works with 64bit unsigned integers for simplicity, so
+	     * we convert the number here and remember if it is negative. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">svalue</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">svalue</span> <span class="o">!=</span> <span class="no">LLONG_MIN</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">value</span> <span class="o">=</span> <span class="o">-</span><span class="n">svalue</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">value</span> <span class="o">=</span> <span class="p">((</span><span class="n">unsigned</span> <span class="n">long</span> <span class="n">long</span><span class="p">)</span> <span class="no">LLONG_MAX</span><span class="p">)</span><span class="o">+</span><span class="mi">1</span><span class="p">;</span>
+	        <span class="p">}</span>
+	        <span class="n">negative</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="n">value</span> <span class="o">=</span> <span class="n">svalue</span><span class="p">;</span>
+	        <span class="n">negative</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Check length. */</span>
+	    <span class="n">uint32_t</span> <span class="n">const</span> <span class="n">length</span> <span class="o">=</span> <span class="n">digits10</span><span class="p">(</span><span class="n">value</span><span class="p">)</span><span class="o">+</span><span class="n">negative</span><span class="p">;</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">length</span> <span class="o">&gt;=</span> <span class="n">dstlen</span><span class="p">)</span> <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	
+	    <span class="sr">/* Null term. */</span>
+	    <span class="n">uint32_t</span> <span class="k">next</span> <span class="o">=</span> <span class="n">length</span><span class="p">;</span>
+	    <span class="n">dst</span><span class="p">[</span><span class="k">next</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'\0'</span><span class="p">;</span>
+	    <span class="k">next</span><span class="o">--</span><span class="p">;</span>
+	    <span class="k">while</span> <span class="p">(</span><span class="n">value</span> <span class="o">&gt;=</span> <span class="mi">100</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">int</span> <span class="n">const</span> <span class="n">i</span> <span class="o">=</span> <span class="p">(</span><span class="n">value</span> <span class="o">%</span> <span class="mi">100</span><span class="p">)</span> <span class="o">*</span> <span class="mi">2</span><span class="p">;</span>
+	        <span class="n">value</span> <span class="o">/=</span> <span class="mi">100</span><span class="p">;</span>
+	        <span class="n">dst</span><span class="p">[</span><span class="k">next</span><span class="p">]</span> <span class="o">=</span> <span class="n">digits</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">];</span>
+	        <span class="n">dst</span><span class="p">[</span><span class="k">next</span> <span class="o">-</span> <span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">digits</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+	        <span class="k">next</span> <span class="o">-=</span> <span class="mi">2</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Handle last 1-2 digits. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">value</span> <span class="o">&lt;</span> <span class="mi">10</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">dst</span><span class="p">[</span><span class="k">next</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'0'</span> <span class="o">+</span> <span class="p">(</span><span class="n">uint32_t</span><span class="p">)</span> <span class="n">value</span><span class="p">;</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="n">int</span> <span class="n">i</span> <span class="o">=</span> <span class="p">(</span><span class="n">uint32_t</span><span class="p">)</span> <span class="n">value</span> <span class="o">*</span> <span class="mi">2</span><span class="p">;</span>
+	        <span class="n">dst</span><span class="p">[</span><span class="k">next</span><span class="p">]</span> <span class="o">=</span> <span class="n">digits</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">];</span>
+	        <span class="n">dst</span><span class="p">[</span><span class="k">next</span> <span class="o">-</span> <span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">digits</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Add sign. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">negative</span><span class="p">)</span> <span class="n">dst</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'-'</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="n">length</span><span class="p">;</span>
+	<span class="p">}</span>
+	
+	<span class="sr">/* Convert a string into a long long. Returns 1 if the string could be parsed
+	 * into a (non-overflowing) long long, 0 otherwise. The value will be set to
+	 * the parsed value when appropriate. */</span>
+	<span class="n">int</span> <span class="n">string2ll</span><span class="p">(</span><span class="n">const</span> <span class="n">char</span> <span class="o">*</span><span class="n">s</span><span class="p">,</span> <span class="n">size_t</span> <span class="n">slen</span><span class="p">,</span> <span class="n">long</span> <span class="n">long</span> <span class="o">*</span><span class="n">value</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">const</span> <span class="n">char</span> <span class="o">*</span><span class="nb">p</span> <span class="o">=</span> <span class="n">s</span><span class="p">;</span>
+	    <span class="n">size_t</span> <span class="n">plen</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">negative</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="n">unsigned</span> <span class="n">long</span> <span class="n">long</span> <span class="n">v</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">plen</span> <span class="o">==</span> <span class="n">slen</span><span class="p">)</span>
+	        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	
+	    <span class="sr">/* Special case: first and only digit is 0. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">slen</span> <span class="o">==</span> <span class="mi">1</span> <span class="o">&amp;&amp;</span> <span class="nb">p</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'0'</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">value</span> <span class="o">!=</span> <span class="no">NULL</span><span class="p">)</span> <span class="o">*</span><span class="n">value</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	        <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="nb">p</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'-'</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">negative</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	        <span class="nb">p</span><span class="o">++</span><span class="p">;</span> <span class="n">plen</span><span class="o">++</span><span class="p">;</span>
+	
+	        <span class="sr">/* Abort on only a negative sign. */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">plen</span> <span class="o">==</span> <span class="n">slen</span><span class="p">)</span>
+	            <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* First digit should be 1-9, otherwise the string should just be 0. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="nb">p</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="s1">'1'</span> <span class="o">&amp;&amp;</span> <span class="nb">p</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="s1">'9'</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">v</span> <span class="o">=</span> <span class="nb">p</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">-</span><span class="s1">'0'</span><span class="p">;</span>
+	        <span class="nb">p</span><span class="o">++</span><span class="p">;</span> <span class="n">plen</span><span class="o">++</span><span class="p">;</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="nb">p</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'0'</span> <span class="o">&amp;&amp;</span> <span class="n">slen</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="o">*</span><span class="n">value</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	        <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="k">while</span> <span class="p">(</span><span class="n">plen</span> <span class="o">&lt;</span> <span class="n">slen</span> <span class="o">&amp;&amp;</span> <span class="nb">p</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="s1">'0'</span> <span class="o">&amp;&amp;</span> <span class="nb">p</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="s1">'9'</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">v</span> <span class="o">&gt;</span> <span class="p">(</span><span class="no">ULLONG_MAX</span> <span class="o">/</span> <span class="mi">10</span><span class="p">))</span> <span class="o">/*</span> <span class="no">Overflow</span><span class="p">.</span> <span class="nf">*</span><span class="o">/</span>
+	            <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	        <span class="n">v</span> <span class="o">*=</span> <span class="mi">10</span><span class="p">;</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="n">v</span> <span class="o">&gt;</span> <span class="p">(</span><span class="no">ULLONG_MAX</span> <span class="o">-</span> <span class="p">(</span><span class="nb">p</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">-</span><span class="s1">'0'</span><span class="p">)))</span> <span class="o">/*</span> <span class="no">Overflow</span><span class="p">.</span> <span class="nf">*</span><span class="o">/</span>
+	            <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	        <span class="n">v</span> <span class="o">+=</span> <span class="nb">p</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">-</span><span class="s1">'0'</span><span class="p">;</span>
+	
+	        <span class="nb">p</span><span class="o">++</span><span class="p">;</span> <span class="n">plen</span><span class="o">++</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Return if not all bytes were used. */</span>
+		<span class="sr">/* non digit exist */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">plen</span> <span class="o">&lt;</span> <span class="n">slen</span><span class="p">)</span>
+	        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">negative</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">v</span> <span class="o">&gt;</span> <span class="p">((</span><span class="n">unsigned</span> <span class="n">long</span> <span class="n">long</span><span class="p">)(</span><span class="o">-</span><span class="p">(</span><span class="no">LLONG_MIN</span><span class="o">+</span><span class="mi">1</span><span class="p">))</span><span class="o">+</span><span class="mi">1</span><span class="p">))</span> <span class="o">/*</span> <span class="no">Overflow</span><span class="p">.</span> <span class="nf">*</span><span class="o">/</span>
+	            <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">value</span> <span class="o">!=</span> <span class="no">NULL</span><span class="p">)</span> <span class="o">*</span><span class="n">value</span> <span class="o">=</span> <span class="o">-</span><span class="n">v</span><span class="p">;</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">v</span> <span class="o">&gt;</span> <span class="no">LLONG_MAX</span><span class="p">)</span> <span class="o">/*</span> <span class="no">Overflow</span><span class="p">.</span> <span class="nf">*</span><span class="o">/</span>
+	            <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">value</span> <span class="o">!=</span> <span class="no">NULL</span><span class="p">)</span> <span class="o">*</span><span class="n">value</span> <span class="o">=</span> <span class="n">v</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+

@@ -1,0 +1,92 @@
+<p>本文使用 proxy 的思想实现 table 的跟踪与只读</p>
+
+<p>本文跟踪table，是指对一个table 的操作，比如访问和更新进行跟踪。当访问一个 table 或者更新 table 中的某个元素时，lua 首先会在 table 查找是否存在该元素，如果没有，就会查找 table 是否存在 <code class="highlighter-rouge">__index(访问)</code> 或者 <code class="highlighter-rouge">__newindex(更新)</code> 原方法。以访问为例，首先在 table 中查找某个字段，如果不存在，解释器会去查找 <code class="highlighter-rouge">__index</code> 这个原方法，如果仍然没有，返回 <strong>nil</strong>。所以说，<code class="highlighter-rouge">__index</code> 和 <code class="highlighter-rouge">__newindex</code> 是在 table 中没有所需访问的 index 时才发挥作用的。</p>
+
+<p>根据上面这种思路，如果我们想跟踪一个 table 的操作行为，那么需要一个空表，每次对这个空表操作的时候，就会使用 <code class="highlighter-rouge">__index</code> 或者 <code class="highlighter-rouge">__newindex</code> 这些元方法，在元方法中对原始 table 进行访问和操作，并打印跟踪信息。而之前创建的那个空表，就是代理。</p>
+
+<h2 id="对单个-table-的跟踪">对单个 table 的跟踪</h2>
+<p>先创建一个代理表，为空表，然后创建 metatable</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">local</span> <span class="n">_t</span> <span class="o">=</span> <span class="n">orignal_table</span> 	<span class="o">--</span> <span class="err">对原表的一个私有访问，原表在其他地方创建的</span>
+	<span class="n">local</span> <span class="n">proxy</span> <span class="o">=</span> <span class="p">{}</span>
+	<span class="n">local</span> <span class="n">mt</span> <span class="o">=</span> <span class="p">{</span>
+		<span class="n">__index</span> <span class="o">=</span> <span class="n">function</span> <span class="p">(</span><span class="n">proxy</span><span class="p">,</span> <span class="n">k</span><span class="p">)</span>
+			<span class="nb">print</span><span class="p">(</span><span class="s2">"access to element "</span> <span class="o">..</span> <span class="n">tostring</span><span class="p">(</span><span class="n">k</span><span class="p">))</span>
+			<span class="k">return</span> <span class="n">_t</span><span class="p">[</span><span class="n">k</span><span class="p">]</span>	<span class="o">--</span> <span class="err">这里访问的其实就是原表中的元素了</span>
+		<span class="k">end</span><span class="p">,</span>
+		<span class="n">__newindex</span> <span class="o">=</span> <span class="n">function</span> <span class="p">(</span><span class="n">proxy</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+			<span class="nb">print</span><span class="p">(</span><span class="s2">"update of element "</span> <span class="o">..</span> <span class="n">tostring</span><span class="p">(</span><span class="n">k</span><span class="p">)</span> <span class="o">..</span> <span class="s2">" to "</span> <span class="o">..</span> <span class="n">tostring</span><span class="p">(</span><span class="n">v</span><span class="p">))</span>
+			<span class="n">_t</span><span class="p">[</span><span class="n">k</span><span class="p">]</span> <span class="o">=</span> <span class="n">v</span>		<span class="o">--</span> <span class="err">更新原表中的元素</span>
+		<span class="k">end</span>
+	<span class="p">}</span>
+	
+	<span class="n">setmetatable</span><span class="p">(</span><span class="n">proxy</span><span class="p">,</span> <span class="n">mt</span><span class="p">)</span>
+	
+	<span class="o">--</span> <span class="err">操作，观察结果</span>
+	<span class="n">proxy</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="s2">"lua"</span>
+	<span class="nb">print</span><span class="p">(</span><span class="n">proxy</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span></code></pre></figure>
+
+<p>结果为：</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>update of element 2 to lua
+access to element 2
+lua
+</code></pre></div></div>
+
+<h2 id="对多个table的跟踪">对多个table的跟踪</h2>
+<p>对多个table的跟踪，思路与上面相同，只需要按照某种形式将每个代理与原表 table 关联起来，并且所有的代理都共享一个公共的元表 metatable，比如将原表 table 保存在代理 table 的一个特殊字段中</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">proxy</span><span class="p">[</span><span class="n">index</span><span class="p">]</span> <span class="o">=</span> <span class="n">t</span> 	<span class="o">--</span> <span class="n">t</span> <span class="err">就是原表</span> <span class="n">table</span>
+	
+<span class="err">代码如下所示：</span>
+
+	<span class="n">local</span> <span class="n">index</span> <span class="o">=</span> <span class="p">{}</span>	<span class="o">--</span>	<span class="err">创建私有索引，即原表在代理表中特殊字段</span>
+	
+	<span class="n">local</span> <span class="n">mt</span> <span class="o">=</span> <span class="p">{</span>
+		<span class="n">__index</span> <span class="o">=</span> <span class="n">function</span> <span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">k</span><span class="p">)</span>
+			<span class="nb">print</span><span class="p">(</span><span class="s2">"access to element "</span> <span class="o">..</span> <span class="n">tostring</span><span class="p">(</span><span class="n">k</span><span class="p">))</span>
+			<span class="k">return</span> <span class="n">t</span><span class="p">[</span><span class="n">index</span><span class="p">][</span><span class="n">k</span><span class="p">]</span>
+		<span class="k">end</span><span class="p">,</span>
+		<span class="n">__newindex</span> <span class="o">=</span> <span class="n">function</span> <span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+			<span class="nb">print</span><span class="p">(</span><span class="s2">"update of element "</span> <span class="o">..</span> <span class="n">tostring</span><span class="p">(</span><span class="n">k</span><span class="p">)</span> <span class="o">..</span> <span class="s2">" to "</span> <span class="o">..</span> <span class="n">tostring</span><span class="p">(</span><span class="n">v</span><span class="p">))</span>
+			<span class="n">t</span><span class="p">[</span><span class="n">index</span><span class="p">][</span><span class="n">k</span><span class="p">]</span> <span class="o">=</span> <span class="n">v</span>
+		<span class="k">end</span>
+	<span class="p">}</span>
+	
+	<span class="n">function</span> <span class="n">track</span> <span class="p">(</span><span class="n">t</span><span class="p">)</span>
+		<span class="n">local</span> <span class="n">proxy</span> <span class="o">=</span> <span class="p">{}</span>
+		<span class="n">proxy</span><span class="p">[</span><span class="n">index</span><span class="p">]</span> <span class="o">=</span> <span class="n">t</span>
+		<span class="n">setmetatable</span><span class="p">(</span><span class="n">proxy</span><span class="p">,</span> <span class="n">mt</span><span class="p">)</span>
+		<span class="k">return</span> <span class="n">proxy</span>
+	<span class="k">end</span>
+	
+	<span class="o">--</span> <span class="n">ori_table</span> <span class="o">=</span> <span class="p">{}</span> <span class="err">在其他地方创建的原表，对他进行跟踪</span>
+	<span class="n">local</span> <span class="n">_o</span> <span class="o">=</span> <span class="n">track</span><span class="p">(</span><span class="n">ori_table</span><span class="p">)</span>
+	
+	<span class="n">_o</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="s2">"lua"</span>
+	<span class="nb">print</span><span class="p">(</span><span class="n">_o</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span></code></pre></figure>
+
+<p>观察输出结果，与上面的相同</p>
+
+<h2 id="只读-table">只读 table</h2>
+<p>只读 table，通过上面的代理的思想也很容易实现，对元方法 <code class="highlighter-rouge">__index</code> ，访问自身，对更新操作的元方法 <code class="highlighter-rouge">__newindex</code>，引发一个错误，<strong>不允许更新</strong>，如下所示：</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">function</span> <span class="n">readOnly</span> <span class="p">(</span><span class="n">t</span><span class="p">)</span>
+		<span class="n">local</span> <span class="n">proxy</span> <span class="o">=</span> <span class="p">{}</span>
+	
+		<span class="n">local</span> <span class="n">mt</span> <span class="o">=</span> <span class="p">{</span>
+			<span class="n">__index</span> <span class="o">=</span> <span class="n">t</span><span class="p">,</span>
+			<span class="n">__newindex</span> <span class="o">=</span> <span class="n">function</span> <span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+				<span class="n">error</span><span class="p">(</span><span class="s2">"attempt to update a read-only table"</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+			<span class="k">end</span>
+		<span class="p">}</span>
+		<span class="n">setmetatable</span><span class="p">(</span><span class="n">proxy</span><span class="p">,</span> <span class="n">mt</span><span class="p">)</span>
+		<span class="k">return</span> <span class="n">proxy</span>
+	<span class="k">end</span></code></pre></figure>
+
+<p>因为 proxy 代理 table 是一个空表，当访问时，解释器通过元方法 <code class="highlighter-rouge">__index</code> 访问，这个元方法此处就是一个 table ，就是原表 table ，直接返回原表 table 中的字段。如果更新字段，解释器将使用元方法 <code class="highlighter-rouge">__newindex</code> 进行更新，触发一个错误，不允许更新，并说明这是只读的 table。</p>
+
+<p><strong>参考文献：</strong> <br /></p>
+<ol>
+  <li>《Programming In Lua》</li>
+</ol>

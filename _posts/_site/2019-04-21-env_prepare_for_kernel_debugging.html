@@ -1,0 +1,42 @@
+<p>how to build environment for debugging linux kernel with gdb and kgdb</p>
+
+<ol>
+  <li>
+    <p>make menu config - to enable KGDB and build the vmlinux file from linux source files. and then make modules and make install to install the new vmlinux file to the current os and replace the kernel with your builded one.</p>
+  </li>
+  <li>
+    <p>update-grub to update the boot file, boot the new kernel when system boot.</p>
+  </li>
+  <li>
+    <p>the upper two steps are all on the target virtual machines</p>
+  </li>
+  <li>
+    <p>on the host machine, you must ensure the sshd service is enabled, and copy the vmlinux file you build on the target virtual machine to it.</p>
+  </li>
+  <li>
+    <p>on the target machine, edit /boot/grub/grub.cfg, add the following to the new version of boot you update before</p>
+
+    <p>kgdbwait kgdboc=ttyS0, 115200</p>
+  </li>
+  <li>
+    <p>disable GRUB_HIDDEN_TIMEOUT=0 and GRUB_HIDDEN_TIMEOUT_QUIET=true in file /etc/default/grub on the target machine.</p>
+
+    <p>and this time, if you reboot the target machine, the os will froze and wait the host machine to connect it with gdb</p>
+  </li>
+</ol>
+
+<p><strong>NOTE:</strong> pay attention to the two arguments in <code class="highlighter-rouge">/boot/grub/grub.cfg</code>, GRUB_HIDDEN_TIMEOUT and GRUB_HIDDEN_TIMEOUT_QUIET, if you don’t disable them, grub will not show selections and directly reboot with the old kernel version when you restart.</p>
+
+<p><strong>To enable CONFIG_KGDB you should first turn on “Prompy for development and/or incomplete code/drivers” (CONFIG_EXPERIMENTAL) in “General setup”, then under the “Kernel debugging” select “KGDB: kernel debugging with remote gdb”. You can see this by “make menuconfig”.</strong></p>
+
+<p>set serial port on virtualbox. settings-&gt;serial ports, on the target virtual machine:</p>
+
+<p><img src="https://github.com/small-cat/small-cat.github.io/raw/master/_pics/serial_ports_settings.png" alt="serial port settings for target" /></p>
+
+<p>on the host virtual machine:</p>
+
+<p><img src="https://github.com/small-cat/small-cat.github.io/raw/master/_pics/serial_port_setting_for_host.png" alt="serial port setting for host" /></p>
+
+<p>NOTE: you should start the target machine first, and then to start host machine, or you will occur an error that can not connect to serial port because we have selected “Connected to existing pipe/socket”, the “/tmp/serial” will be created on the target machine.</p>
+
+<p>At the end, of course you could have other ways to build your debugging environment.</p>

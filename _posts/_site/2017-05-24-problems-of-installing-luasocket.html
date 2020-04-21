@@ -1,0 +1,87 @@
+<p>本文主要介绍 luasocket 的安装和部署</p>
+
+<p>初学 lua，当读到《lua 程序设计》中9.4节非抢占式(non-preemptive)多线程时，例子中用到了</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>require "socket"
+</code></pre></div></div>
+
+<p>在我的 lua 环境中，直接使用出错了，因为这是一个外部c的动态库，需要下载编译配置好才能使用。</p>
+
+<p>luasocket 是Diego Nehab 写的，GitHub的地址为 [https://github.com/diegonehab/luasocket]，现在的版本较之前的版本做了一些改动。下面说一下编译和安装的期间的一些问题： <br />
+1、 在根目录下有一个 makefile 文件，查看 makefile 文件，发现其实都是进入 src 目录后在进行编译的，具体的编译信息进入 src 中查看 makefile 文件</p>
+
+<p>2、 在src中，makefile 文件显示，luasocket 能够支持的平台有 linux, win32, Solaris, mingw, macosx。如果你是在 linux 中的话，</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>make linux
+</code></pre></div></div>
+
+<p>即可。但是需要注意，这里依赖需要有 lua.h 等头文件，你需要在 makefile 中修改一下</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>LUAINC_linux
+</code></pre></div></div>
+
+<p>这个变量的值，即将路径修改为你主机上的目录，不然编译会出错</p>
+
+<p>3、 编译成功后，不会像之前版本中直接编译成功为 socket.so 这样的库文件，生成的库文件为</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>mime-1.0.3.so
+unix.so
+serial.so
+socket-3.0-rc1.so
+</code></pre></div></div>
+
+<p>当然，主要关注前两个即可。使用</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>make install
+</code></pre></div></div>
+
+<p>安装，(这里说明一下，楼主的 lua 是 5.1 版本的)，会安装在</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/usr/local/share/lua/5.1/
+/usr/local/lib/lua/5.1/
+</code></pre></div></div>
+
+<p>这两个目录中，查看 makefile 文件也能发现</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>install: 
+	$(INSTALL_DIR) $(INSTALL_TOP_LDIR)
+	$(INSTALL_DATA) $(TO_TOP_LDIR) $(INSTALL_TOP_LDIR)
+	$(INSTALL_DIR) $(INSTALL_SOCKET_LDIR)
+	$(INSTALL_DATA) $(TO_SOCKET_LDIR) $(INSTALL_SOCKET_LDIR)
+	$(INSTALL_DIR) $(INSTALL_SOCKET_CDIR)
+	$(INSTALL_EXEC) $(SOCKET_SO) $(INSTALL_SOCKET_CDIR)/core.$(SO)
+	$(INSTALL_DIR) $(INSTALL_MIME_CDIR)
+	$(INSTALL_EXEC) $(MIME_SO) $(INSTALL_MIME_CDIR)/core.$(SO)
+</code></pre></div></div>
+
+<p>这里有一点不同的是，安装的时候，将 <code class="highlighter-rouge">unix.so</code> 和 <code class="highlighter-rouge">mime-1.0.3.so</code> 命名为 <code class="highlighter-rouge">core.so</code>，因为在 socket.lua 文件中，使用的是 <code class="highlighter-rouge">require "socket.core"</code></p>
+
+<p>#require 是如何查找库文件的呢
+查看 lua 手册 [http://www.lua.org/manual/5.2/manual.html#6.3]</p>
+
+<p>lua 中，package 库为加载模块提供了所有基础方法，所有信息保存在表 package 中。</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>require(modulename)
+</code></pre></div></div>
+
+<p>首先，lua会先在 <code class="highlighter-rouge">package.loaded</code> 表中查找是否该模块已经加载，如果已经加载过了，直接返回保存在该表中的信息 <code class="highlighter-rouge">package.loaded[modulename]</code>。如果没有，lua 会试图为该模块找一个加载器(loader)，首先在 <code class="highlighter-rouge">package.preload</code> 表中查找模块，是否有 <code class="highlighter-rouge">package.preload[modulename]</code>，如果有，就以该函数作为加载器。如果没有，lua 会尝试从 lua 文件或者 c 文件中加载该模块。根据 <code class="highlighter-rouge">package.path</code> 查找 lua 文件，否则，继续根据 <code class="highlighter-rouge">package.cpath</code> 查找 c 文件。</p>
+
+<p>Lua 用于搜索 lua 文件的路径存储在 <code class="highlighter-rouge">package.path</code> 中，lua 启动之后，就会以环境变量 LUA_PATH 来初始化这个变量，如果没有找到这个环境变量，那么会使用编译时定义的默认路径来初始化。</p>
+
+<p>当Lua无法找到与模块名相符合的 lua 文件时，就会查找 c 程序库。查找c程序库的路径存储在 <code class="highlighter-rouge">package.cpath</code> 中，这个变量视通过环境变量 LUA_CPATH 来初始化的。</p>
+
+<p>所以，当在环境中安装好 luasocket 的时候，使用</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>require "socket"
+</code></pre></div></div>
+
+<p>仍然出现</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>./socket.lua:12: module 'socket.core' not found
+</code></pre></div></div>
+
+<p>的错误时，在之前先配置一下 <code class="highlighter-rouge">package.path</code> 和 <code class="highlighter-rouge">package.cpath</code> 即可</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>package.path = "/usr/local/share/lua/5.1/?.lua"
+package.cpath = "/usr/local/lib/lua/5.1/?.so"
+</code></pre></div></div>

@@ -1,0 +1,1504 @@
+<p>对 redis 中，cs结构的服务器的分析。</p>
+
+<h1 id="服务器与客户端是如何交互的">服务器与客户端是如何交互的</h1>
+<p>redis客户端向服务器发送命令请求，服务器接收到客户端发送的命令请求之后，读取解析命令，并执行命令，同时将命令执行结果返回给客户端。</p>
+
+<p>客户端与服务器交互的代码流程如下图所示： <br />
+<img src="https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/redis_clientServer_flow.png" alt="代码流程" /></p>
+
+<p>Redis 服务器负责与多个客户端建立网络连接，处理客户端发送的命令请求，在数据库中保存客户端执行的命令产生的数据，并通过资源管理器来维护服务器自身的运转。</p>
+
+<p>redis服务器是一个事件驱动程序，主要为文件事件(File Event)和时间事件(Time Event)。当启动服务器时，服务器在初始化的过程中，会创建时间事件和文件事件，并将对应的事件与事件处理函数绑定，当客户端请求服务器连接或者发送命令请求时，服务器端会触发相应的事件，通过事件处理函数处理完毕后，由服务器通过应答处理事件返回给客户端。时间事件有定时事件和周期性事件两种。</p>
+
+<h1 id="服务器中的事件驱动">服务器中的事件驱动</h1>
+<p>redis服务器主要处理两种事件： <br /></p>
+
+<ul>
+  <li>文件事件：这是服务器对套接字操作的抽象，服务器与客户端的通信会产生相应的文件事件，服务器通过监听并处理这些事件来完成一系列的网络通信操作。</li>
+  <li>时间事件：redis中的一些操作需要在指定的时间点执行，时间事件就是服务器对这些定点操作的抽象。</li>
+</ul>
+
+<h2 id="文件事件">文件事件</h2>
+<p>redis 基于 Reactor 模式开发了自己的网络事件处理器，称为文件事件处理器。</p>
+<h3 id="文件事件处理器的构成">文件事件处理器的构成</h3>
+<p>redis文件事件处理器分为四个组成部分，套接字、IO多路复用程序、文件事件分派器和时间处理函数。</p>
+
+<p>文件事件是对套接字的抽象，当一个套接字准备好执行连接应答(accept)、写入(write)、读取(read)、关闭(close)操作时，就会产生一个文件事件，服务器通过IO多路复用同时监听多个套接字，当这些监听的套接字产生文件事件时，通过轮询的方式，文件事件分派器会对这些文件事件启动相应的事件处理函数。在aeProcessEvents函数中，通过循环的方式，对每一个文件事件进行处理。IO多路复用总是将所有产生事件的套接字都放在一个队列里面，然后按照顺序每次一个套接字的方式向文件事件分派器传送套接字，当上一个套接字产生的事件处理完毕之后，才会处理下一个套接字的文件事件。</p>
+
+<h3 id="io多路复用程序">IO多路复用程序</h3>
+<p>redis中的IO多路复用程序的功能是通过包装 select、epoll、evpoll 和 kqueue 这些IO多路复用库函数来实现的，在源码中对应的文件名为 <code class="highlighter-rouge">ae_select.c</code>、<code class="highlighter-rouge">ae_epoll.c</code>、<code class="highlighter-rouge">ae_evpoll.c</code>、<code class="highlighter-rouge">ae_kqueue.c</code>。redis在封装这些库函数时，都使用了相同的API，类似于C++的多态实现，这样，IO多路复用程序的底层实现就能够互换。代码如下所示</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Include the best multiplexing layer supported by this system.
+ * The following should be ordered by performances, descending. */
+#ifdef HAVE_EVPORT
+#include "ae_evport.c"
+#else
+    #ifdef HAVE_EPOLL
+    #include "ae_epoll.c"
+    #else
+        #ifdef HAVE_KQUEUE
+        #include "ae_kqueue.c"
+        #else
+        #include "ae_select.c"
+        #endif
+    #endif
+#endif
+</code></pre></div></div>
+
+<p>通过宏定义规则，在编译时自动选择系统中性能最高的IO多路复用库函数作为redis底层IO多路复用程序的实现，这种方法很巧妙。</p>
+
+<h3 id="文件事件处理器的实现">文件事件处理器的实现</h3>
+<p><strong>问题：redis文件事件处理器是由套接字、IO多路复用程序、文件事件分派器和事件处理函数组成，那么套接字能够产生哪些事件，事件处理函数又有哪些操作呢？</strong></p>
+
+<h4 id="事件的类型">事件的类型</h4>
+<p>在redis中，文件事件创建函数为 <code class="highlighter-rouge">aeCreateFileEvent</code>，其函数如下</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* 
+	fd : socket file descriptor
+	mask : type of event, READABLE or WRITABLE
+	proc : handler of file event
+	 */</span>
+	<span class="n">int</span> <span class="n">aeCreateFileEvent</span><span class="p">(</span><span class="n">aeEventLoop</span> <span class="o">*</span><span class="n">eventLoop</span><span class="p">,</span> <span class="n">int</span> <span class="n">fd</span><span class="p">,</span> <span class="n">int</span> <span class="n">mask</span><span class="p">,</span>
+	        <span class="n">aeFileProc</span> <span class="o">*</span><span class="nb">proc</span><span class="p">,</span> <span class="n">void</span> <span class="o">*</span><span class="n">clientData</span><span class="p">)</span>
+	<span class="p">{</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">fd</span> <span class="o">&gt;=</span> <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">setsize</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">errno</span> <span class="o">=</span> <span class="no">ERANGE</span><span class="p">;</span>
+	        <span class="k">return</span> <span class="no">AE_ERR</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="n">aeFileEvent</span> <span class="o">*</span><span class="n">fe</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">events</span><span class="p">[</span><span class="n">fd</span><span class="p">];</span>
+	
+		<span class="sr">/* add file event, attach fd to event 
+		   if type is READABLE, add fd to fd_set rfds, else if type is WRITABLE, add to wfds
+		 */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">aeApiAddEvent</span><span class="p">(</span><span class="n">eventLoop</span><span class="p">,</span> <span class="n">fd</span><span class="p">,</span> <span class="n">mask</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>	
+	        <span class="k">return</span> <span class="no">AE_ERR</span><span class="p">;</span>
+	    <span class="n">fe</span><span class="o">-&gt;</span><span class="n">mask</span> <span class="o">|=</span> <span class="n">mask</span><span class="p">;</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">mask</span> <span class="o">&amp;</span> <span class="no">AE_READABLE</span><span class="p">)</span> <span class="n">fe</span><span class="o">-&gt;</span><span class="n">rfileProc</span> <span class="o">=</span> <span class="nb">proc</span><span class="p">;</span>	<span class="sr">//no</span><span class="n">w</span> <span class="n">fd</span> <span class="n">attach</span> <span class="n">to</span> <span class="n">file</span> <span class="n">event</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">mask</span> <span class="o">&amp;</span> <span class="no">AE_WRITABLE</span><span class="p">)</span> <span class="n">fe</span><span class="o">-&gt;</span><span class="n">wfileProc</span> <span class="o">=</span> <span class="nb">proc</span><span class="p">;</span>
+	    <span class="n">fe</span><span class="o">-&gt;</span><span class="n">clientData</span> <span class="o">=</span> <span class="n">clientData</span><span class="p">;</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">fd</span> <span class="o">&gt;</span> <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">maxfd</span><span class="p">)</span>
+	        <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">maxfd</span> <span class="o">=</span> <span class="n">fd</span><span class="p">;</span>
+	    <span class="k">return</span> <span class="no">AE_OK</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>mask 为事件的类型，为 <code class="highlighter-rouge">AE_WRITABLE</code> 和 <code class="highlighter-rouge">AE_READABLE</code> 两种，分别为可写和可读两种类型。proc 为文件事件处理函数，fd 为套接字的文件描述符，而 clientData 则是客户端在服务器端的状态信息，这个后面会重点讲述。</p>
+
+<p>也就是说，文件事件的类型分为可读和可写两种类型，当然，同一个套接字是允许同时产生这两种类型的事件的。</p>
+
+<p><strong>问题：那么，什么时候，套接字产生的文件是可读的，什么时候是可写的呢？</strong></p>
+
+<ol>
+  <li>当客户端对服务器发起连接请求（即客户端对服务器监听的套接字执行connect操作），或者客户端对套接字执行 write 或 close 操作时，套接字变的可读，此时产生可读事件 (AE_READABLE)。</li>
+  <li>当客户端对套接字执行 read 操作时，套接字变得可写，此时产生可写事件 (AE_WRITABLE)。</li>
+</ol>
+
+<p>通过查看 <code class="highlighter-rouge">ae_select.c/aeApiPoll</code> 函数理解服务器是如何监听套接字的文件事件的。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">static</span> <span class="n">int</span> <span class="n">aeApiPoll</span><span class="p">(</span><span class="n">aeEventLoop</span> <span class="o">*</span><span class="n">eventLoop</span><span class="p">,</span> <span class="n">struct</span> <span class="n">timeval</span> <span class="o">*</span><span class="n">tvp</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">aeApiState</span> <span class="o">*</span><span class="n">state</span> <span class="o">=</span> <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">apidata</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">retval</span><span class="p">,</span> <span class="n">j</span><span class="p">,</span> <span class="n">numevents</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	
+	    <span class="n">memcpy</span><span class="p">(</span><span class="o">&amp;</span><span class="n">state</span><span class="o">-&gt;</span><span class="n">_rfds</span><span class="p">,</span><span class="o">&amp;</span><span class="n">state</span><span class="o">-&gt;</span><span class="n">rfds</span><span class="p">,</span><span class="n">sizeof</span><span class="p">(</span><span class="n">fd_set</span><span class="p">));</span>
+	    <span class="n">memcpy</span><span class="p">(</span><span class="o">&amp;</span><span class="n">state</span><span class="o">-&gt;</span><span class="n">_wfds</span><span class="p">,</span><span class="o">&amp;</span><span class="n">state</span><span class="o">-&gt;</span><span class="n">wfds</span><span class="p">,</span><span class="n">sizeof</span><span class="p">(</span><span class="n">fd_set</span><span class="p">));</span>
+	
+		<span class="sr">/* allow a program to monitor multiple file descriptors, waiting until 
+		   one or more of the file descriptors become "ready" */</span>
+	    <span class="n">retval</span> <span class="o">=</span> <span class="nb">select</span><span class="p">(</span><span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">maxfd</span><span class="o">+</span><span class="mi">1</span><span class="p">,</span>
+	                <span class="o">&amp;</span><span class="n">state</span><span class="o">-&gt;</span><span class="n">_rfds</span><span class="p">,</span><span class="o">&amp;</span><span class="n">state</span><span class="o">-&gt;</span><span class="n">_wfds</span><span class="p">,</span><span class="no">NULL</span><span class="p">,</span><span class="n">tvp</span><span class="p">);</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">retval</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">for</span> <span class="p">(</span><span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;=</span> <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">maxfd</span><span class="p">;</span> <span class="n">j</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">int</span> <span class="n">mask</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	            <span class="n">aeFileEvent</span> <span class="o">*</span><span class="n">fe</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">events</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+	
+	            <span class="k">if</span> <span class="p">(</span><span class="n">fe</span><span class="o">-&gt;</span><span class="n">mask</span> <span class="o">==</span> <span class="no">AE_NONE</span><span class="p">)</span> <span class="n">continue</span><span class="p">;</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">fe</span><span class="o">-&gt;</span><span class="n">mask</span> <span class="o">&amp;</span> <span class="no">AE_READABLE</span> <span class="o">&amp;&amp;</span> <span class="no">FD_ISSET</span><span class="p">(</span><span class="n">j</span><span class="p">,</span><span class="o">&amp;</span><span class="n">state</span><span class="o">-&gt;</span><span class="n">_rfds</span><span class="p">))</span>
+	                <span class="n">mask</span> <span class="o">|=</span> <span class="no">AE_READABLE</span><span class="p">;</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">fe</span><span class="o">-&gt;</span><span class="n">mask</span> <span class="o">&amp;</span> <span class="no">AE_WRITABLE</span> <span class="o">&amp;&amp;</span> <span class="no">FD_ISSET</span><span class="p">(</span><span class="n">j</span><span class="p">,</span><span class="o">&amp;</span><span class="n">state</span><span class="o">-&gt;</span><span class="n">_wfds</span><span class="p">))</span>
+	                <span class="n">mask</span> <span class="o">|=</span> <span class="no">AE_WRITABLE</span><span class="p">;</span>
+	            <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">fired</span><span class="p">[</span><span class="n">numevents</span><span class="p">].</span><span class="nf">fd</span> <span class="o">=</span> <span class="n">j</span><span class="p">;</span>
+	            <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">fired</span><span class="p">[</span><span class="n">numevents</span><span class="p">].</span><span class="nf">mask</span> <span class="o">=</span> <span class="n">mask</span><span class="p">;</span>
+	            <span class="n">numevents</span><span class="o">++</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="n">numevents</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>返回值 numevents，为产生的文件事件的个数。通过多路复用IO库函数 select，监听多个套接字，当套接字符合上述要求时，会变得可读或者可写，可读的套接字保存在套接字集合 <code class="highlighter-rouge">state-&gt;_rfds</code> 中，可写的保存在 <code class="highlighter-rouge">state-&gt;_wfds</code> 中，异常情况的套接字集合设置为 NULL，这里不关心。然后根据套接字的可读或者可写状态，预设文件事件，将他们的文件描述符fd 和 事件类型 mask 保存在 fired 数组中，这个数组中保存的都是产生事件的套接字，然后通过扫描 fired 数组，对产生的文件事件一个一个的进行处理。</p>
+
+<blockquote>
+  <p>如果对 select 函数不了解，可查看 <strong>select函数详解及实例解析</strong>[http://blog.csdn.net/leo115/article/details/8097143]</p>
+</blockquote>
+
+<p>在 <code class="highlighter-rouge">aeProcessEvents</code> 函数中，通过调用上述的 <code class="highlighter-rouge">aeApiPoll</code> 函数，等待和分配文件事件，然后调用对应的事件处理函数进行处理。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Process every pending time event, then every pending file event
+	 * (that may be registered by time event callbacks just processed).
+	 * Without special flags the function sleeps until some file event
+	 * fires, or when the next time event occurs (if any).
+	 *
+	 * If flags is 0, the function does nothing and returns.
+	 * if flags has AE_ALL_EVENTS set, all the kind of events are processed.
+	 * if flags has AE_FILE_EVENTS set, file events are processed.
+	 * if flags has AE_TIME_EVENTS set, time events are processed.
+	 * if flags has AE_DONT_WAIT set the function returns ASAP until all
+	 * the events that's possible to process without to wait are processed.
+	 *
+	 * The function returns the number of events processed. */</span>
+	 <span class="sr">/* the event dispatcher, make a choice to select an event handler */</span>
+	<span class="n">int</span> <span class="n">aeProcessEvents</span><span class="p">(</span><span class="n">aeEventLoop</span> <span class="o">*</span><span class="n">eventLoop</span><span class="p">,</span> <span class="n">int</span> <span class="n">flags</span><span class="p">)</span>
+	<span class="p">{</span>
+	    <span class="n">int</span> <span class="n">processed</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="n">numevents</span><span class="p">;</span>
+	
+	    <span class="sr">/* Nothing to do? return ASAP */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">AE_TIME_EVENTS</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="p">(</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">AE_FILE_EVENTS</span><span class="p">))</span> <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+	
+	    <span class="sr">/* Note that we want call select() even if there are no
+	     * file events to process as long as we want to process time
+	     * events, in order to sleep until the next time event is ready
+	     * to fire. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">maxfd</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span> <span class="o">||</span>
+	        <span class="p">((</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">AE_TIME_EVENTS</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="p">(</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">AE_DONT_WAIT</span><span class="p">)))</span> <span class="p">{</span>
+	        <span class="n">int</span> <span class="n">j</span><span class="p">;</span>
+	        <span class="n">aeTimeEvent</span> <span class="o">*</span><span class="n">shortest</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	        <span class="n">struct</span> <span class="n">timeval</span> <span class="n">tv</span><span class="p">,</span> <span class="o">*</span><span class="n">tvp</span><span class="p">;</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">AE_TIME_EVENTS</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="p">(</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">AE_DONT_WAIT</span><span class="p">))</span>
+	            <span class="n">shortest</span> <span class="o">=</span> <span class="n">aeSearchNearestTimer</span><span class="p">(</span><span class="n">eventLoop</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">shortest</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">long</span> <span class="n">now_sec</span><span class="p">,</span> <span class="n">now_ms</span><span class="p">;</span>
+	
+	            <span class="sr">/* Calculate the time missing for the nearest
+	             * timer to fire. */</span>
+	            <span class="n">aeGetTime</span><span class="p">(</span><span class="o">&amp;</span><span class="n">now_sec</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">now_ms</span><span class="p">);</span>
+	            <span class="n">tvp</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">tv</span><span class="p">;</span>
+	            <span class="n">tvp</span><span class="o">-&gt;</span><span class="n">tv_sec</span> <span class="o">=</span> <span class="n">shortest</span><span class="o">-&gt;</span><span class="n">when_sec</span> <span class="o">-</span> <span class="n">now_sec</span><span class="p">;</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">shortest</span><span class="o">-&gt;</span><span class="n">when_ms</span> <span class="o">&lt;</span> <span class="n">now_ms</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">tvp</span><span class="o">-&gt;</span><span class="n">tv_usec</span> <span class="o">=</span> <span class="p">((</span><span class="n">shortest</span><span class="o">-&gt;</span><span class="n">when_ms</span><span class="o">+</span><span class="mi">1000</span><span class="p">)</span> <span class="o">-</span> <span class="n">now_ms</span><span class="p">)</span><span class="o">*</span><span class="mi">1000</span><span class="p">;</span>
+	                <span class="n">tvp</span><span class="o">-&gt;</span><span class="n">tv_sec</span> <span class="o">--</span><span class="p">;</span>
+	            <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	                <span class="n">tvp</span><span class="o">-&gt;</span><span class="n">tv_usec</span> <span class="o">=</span> <span class="p">(</span><span class="n">shortest</span><span class="o">-&gt;</span><span class="n">when_ms</span> <span class="o">-</span> <span class="n">now_ms</span><span class="p">)</span><span class="o">*</span><span class="mi">1000</span><span class="p">;</span>
+	            <span class="p">}</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">tvp</span><span class="o">-&gt;</span><span class="n">tv_sec</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="n">tvp</span><span class="o">-&gt;</span><span class="n">tv_sec</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">tvp</span><span class="o">-&gt;</span><span class="n">tv_usec</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="n">tvp</span><span class="o">-&gt;</span><span class="n">tv_usec</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="sr">/* If we have to check for events but need to return
+	             * ASAP because of AE_DONT_WAIT we need to set the timeout
+	             * to zero */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">AE_DONT_WAIT</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">tv</span><span class="p">.</span><span class="nf">tv_sec</span> <span class="o">=</span> <span class="n">tv</span><span class="p">.</span><span class="nf">tv_usec</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	                <span class="n">tvp</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">tv</span><span class="p">;</span>
+	            <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	                <span class="sr">/* Otherwise we can block */</span>
+	                <span class="n">tvp</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span> <span class="sr">/* wait forever */</span>
+	            <span class="p">}</span>
+	        <span class="p">}</span>
+	
+	        <span class="n">numevents</span> <span class="o">=</span> <span class="n">aeApiPoll</span><span class="p">(</span><span class="n">eventLoop</span><span class="p">,</span> <span class="n">tvp</span><span class="p">);</span>	<span class="sr">//</span><span class="n">how</span> <span class="n">many</span> <span class="n">events</span> <span class="n">fired</span>
+	        <span class="k">for</span> <span class="p">(</span><span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">numevents</span><span class="p">;</span> <span class="n">j</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">aeFileEvent</span> <span class="o">*</span><span class="n">fe</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">events</span><span class="p">[</span><span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">fired</span><span class="p">[</span><span class="n">j</span><span class="p">].</span><span class="nf">fd</span><span class="p">];</span>
+	            <span class="n">int</span> <span class="n">mask</span> <span class="o">=</span> <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">fired</span><span class="p">[</span><span class="n">j</span><span class="p">].</span><span class="nf">mask</span><span class="p">;</span>
+	            <span class="n">int</span> <span class="n">fd</span> <span class="o">=</span> <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">fired</span><span class="p">[</span><span class="n">j</span><span class="p">].</span><span class="nf">fd</span><span class="p">;</span>
+	            <span class="n">int</span> <span class="n">rfired</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	
+		    <span class="sr">/* note the fe-&gt;mask &amp; mask &amp; ... code: maybe an already processed
+	             * event removed an element that fired and we still didn't
+	             * processed, so we check if the event is still valid. */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">fe</span><span class="o">-&gt;</span><span class="n">mask</span> <span class="o">&amp;</span> <span class="n">mask</span> <span class="o">&amp;</span> <span class="no">AE_READABLE</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">rfired</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+	                <span class="n">fe</span><span class="o">-&gt;</span><span class="n">rfileProc</span><span class="p">(</span><span class="n">eventLoop</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="n">fe</span><span class="o">-&gt;</span><span class="n">clientData</span><span class="p">,</span><span class="n">mask</span><span class="p">);</span>
+	            <span class="p">}</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">fe</span><span class="o">-&gt;</span><span class="n">mask</span> <span class="o">&amp;</span> <span class="n">mask</span> <span class="o">&amp;</span> <span class="no">AE_WRITABLE</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">rfired</span> <span class="o">||</span> <span class="n">fe</span><span class="o">-&gt;</span><span class="n">wfileProc</span> <span class="o">!=</span> <span class="n">fe</span><span class="o">-&gt;</span><span class="n">rfileProc</span><span class="p">)</span>
+	                    <span class="n">fe</span><span class="o">-&gt;</span><span class="n">wfileProc</span><span class="p">(</span><span class="n">eventLoop</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="n">fe</span><span class="o">-&gt;</span><span class="n">clientData</span><span class="p">,</span><span class="n">mask</span><span class="p">);</span>
+	            <span class="p">}</span>
+	            <span class="n">processed</span><span class="o">++</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	    <span class="sr">/* Check time events */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">AE_TIME_EVENTS</span><span class="p">)</span>
+	        <span class="n">processed</span> <span class="o">+=</span> <span class="n">processTimeEvents</span><span class="p">(</span><span class="n">eventLoop</span><span class="p">);</span>
+	
+	    <span class="k">return</span> <span class="n">processed</span><span class="p">;</span> <span class="sr">/* return the number of processed file/</span><span class="n">time</span> <span class="n">events</span> <span class="o">*</span><span class="sr">/
+	}</span></code></pre></figure>
+
+<p><code class="highlighter-rouge">aeProcessEvents</code> 函数，先处理文件事件，如果此时时间事件触发，在处理时间事件。<code class="highlighter-rouge">aeProcessEvents</code> 就是时间分派器，将产生的文件事件分派给对应的事件处理函数进行处理。</p>
+
+<h3 id="事件处理函数">事件处理函数</h3>
+<p>现在再来回顾一下，redis文件事件处理器的构成，套接字、IO多路复用程序、事件分派器和事件处理函数。如下图所示： <br />
+<img src="https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/file_events_components.png" alt="components of file events" /></p>
+
+<p>redis 服务器中，事件处理函数，主要由上图中列出的三种，连接应答处理器(acceptTcpHandler)、命令请求处理器(readQueryFromClient)和命令回复处理器(sendReplyToClient)。这里所说的都是文件事件处理函数。</p>
+
+<p><strong>连接应答处理器 acceptTcpHandler</strong> <br />
+用于对服务器监听的套接字请求连接的客户端进行应答(即客户端执行connect)，具体实现为 <code class="highlighter-rouge">accept()</code> 函数的封装。</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>void initServer (void)
+{
+	...
+	/* Create an event handler for accepting new connections in TCP and Unix
+	 * domain sockets. */
+	for (j = 0; j &lt; server.ipfd_count; j++) {
+   		if (aeCreateFileEvent(server.el, server.ipfd[j], 	AE_READABLE,
+        	acceptTcpHandler,NULL) == AE_ERR) {
+            	redisPanic(
+                	"Unrecoverable error creating server.ipfd file event.");
+        	}
+	}
+	...
+} 
+</code></pre></div></div>
+
+<p>redis 在初始化时，会创建文件事件，将连接应答处理器与服务器监听的套接字的 <code class="highlighter-rouge">AE_READABLE</code> 类型的事件关联起来(或者说是绑定)，当客户端连接服务器(connect)时，该被服务器监听的套接字会会变成 <code class="highlighter-rouge">AE_READABLE</code> ，IO多路复用程序将该套接字保存在可读的套接字集合中，引发连接应答处理器执行相应的操作。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">void</span> <span class="n">acceptTcpHandler</span><span class="p">(</span><span class="n">aeEventLoop</span> <span class="o">*</span><span class="n">el</span><span class="p">,</span> <span class="n">int</span> <span class="n">fd</span><span class="p">,</span> <span class="n">void</span> <span class="o">*</span><span class="n">privdata</span><span class="p">,</span> <span class="n">int</span> <span class="n">mask</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">int</span> <span class="n">cport</span><span class="p">,</span> <span class="n">cfd</span><span class="p">,</span> <span class="n">max</span> <span class="o">=</span> <span class="no">MAX_ACCEPTS_PER_CALL</span><span class="p">;</span>
+	    <span class="n">char</span> <span class="n">cip</span><span class="p">[</span><span class="no">REDIS_IP_STR_LEN</span><span class="p">];</span>
+	    <span class="no">REDIS_NOTUSED</span><span class="p">(</span><span class="n">el</span><span class="p">);</span>
+	    <span class="no">REDIS_NOTUSED</span><span class="p">(</span><span class="n">mask</span><span class="p">);</span>
+	    <span class="no">REDIS_NOTUSED</span><span class="p">(</span><span class="n">privdata</span><span class="p">);</span>
+	
+	    <span class="k">while</span><span class="p">(</span><span class="n">max</span><span class="o">--</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">cfd</span> <span class="o">=</span> <span class="n">anetTcpAccept</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">neterr</span><span class="p">,</span> <span class="n">fd</span><span class="p">,</span> <span class="n">cip</span><span class="p">,</span> <span class="n">sizeof</span><span class="p">(</span><span class="n">cip</span><span class="p">),</span> <span class="o">&amp;</span><span class="n">cport</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">cfd</span> <span class="o">==</span> <span class="no">ANET_ERR</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">errno</span> <span class="o">!=</span> <span class="no">EWOULDBLOCK</span><span class="p">)</span>
+	                <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span>
+	                    <span class="s2">"Accepting client connection: %s"</span><span class="p">,</span> <span class="n">server</span><span class="p">.</span><span class="nf">neterr</span><span class="p">);</span>
+	            <span class="k">return</span><span class="p">;</span>
+	        <span class="p">}</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_VERBOSE</span><span class="p">,</span><span class="s2">"Accepted %s:%d"</span><span class="p">,</span> <span class="n">cip</span><span class="p">,</span> <span class="n">cport</span><span class="p">);</span>
+	        <span class="n">acceptCommonHandler</span><span class="p">(</span><span class="n">cfd</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+	    <span class="p">}</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p><strong>命令请求处理器 readQueryFromClient</strong> <br />
+负责读取客户端发送的命令请求内容，底层实现为 <code class="highlighter-rouge">read</code> 函数的封装。当客户端通过连接应答处理器成功连接服务器之后，服务器会将命令请求处理器与套接字的 <code class="highlighter-rouge">AE_READABLE</code> 关联起来，当客户端向服务器发送命令请求的时候，套接字就产生了 <code class="highlighter-rouge">AE_READABLE</code> 类型的文件事件，触发命令请求处理器，由该处理器对套接字执行相应的操作。</p>
+
+<p>在服务器端，会有一个 <code class="highlighter-rouge">redisClient</code> 结构，用于保存客户端的状态信息。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">static</span> <span class="n">void</span> <span class="n">acceptCommonHandler</span><span class="p">(</span><span class="n">int</span> <span class="n">fd</span><span class="p">,</span> <span class="n">int</span> <span class="n">flags</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span><span class="p">;</span>
+	    <span class="k">if</span> <span class="p">((</span><span class="n">c</span> <span class="o">=</span> <span class="n">createClient</span><span class="p">(</span><span class="n">fd</span><span class="p">))</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span>
+	            <span class="s2">"Error registering fd event for the new client: %s (fd=%d)"</span><span class="p">,</span>
+	            <span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">),</span><span class="n">fd</span><span class="p">);</span>
+	        <span class="n">close</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span> <span class="sr">/* May be already closed, just ignore errors */</span>
+	        <span class="k">return</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="sr">/* If maxclient directive is set and this is one client more... close the
+	     * connection. Note that we create the client instead to check before
+	     * for this condition, since now the socket is already set in non-blocking
+	     * mode and we can send an error for free using the Kernel I/</span><span class="no">O</span> <span class="o">*</span><span class="sr">/
+	    if (listLength(server.clients) &gt; server.maxclients) {
+	        char *err = "-ERR max number of clients reached\r\n";
+	
+	        /</span><span class="o">*</span> <span class="no">That</span><span class="s1">'s a best effort error message, don'</span><span class="n">t</span> <span class="n">check</span> <span class="n">write</span> <span class="n">errors</span> <span class="o">*</span><span class="sr">/
+	        if (write(c-&gt;fd,err,strlen(err)) == -1) {
+	            /</span><span class="o">*</span> <span class="no">Nothing</span> <span class="n">to</span> <span class="k">do</span><span class="p">,</span> <span class="no">Just</span> <span class="n">to</span> <span class="n">avoid</span> <span class="n">the</span> <span class="n">warning</span><span class="o">...</span> <span class="o">*</span><span class="sr">/
+	        }
+	        server.stat_rejected_conn++;
+	        freeClient(c);
+	        return;
+	    }
+	    server.stat_numconnections++;
+	    c-&gt;flags |= flags;
+	}</span></code></pre></figure>
+
+<p>连接应答处理器连接成功时，会处理上述函数，函数的主要功能，是当客户端成功连接服务器时，就创建一个新的客户端类型的对象(redisClient)用于保存客户端的信息，同时，将该客户端加入到服务器的客户端链表中。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">redisClient</span> <span class="o">*</span><span class="n">createClient</span><span class="p">(</span><span class="n">int</span> <span class="n">fd</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span> <span class="o">=</span> <span class="n">zmalloc</span><span class="p">(</span><span class="n">sizeof</span><span class="p">(</span><span class="n">redisClient</span><span class="p">));</span>
+	
+	    <span class="sr">/* passing -1 as fd it is possible to create a non connected client.
+	     * This is useful since all the Redis commands needs to be executed
+	     * in the context of a client. When commands are executed in other
+	     * contexts (for instance a Lua script) we need a non connected client. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">fd</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">anetNonBlock</span><span class="p">(</span><span class="no">NULL</span><span class="p">,</span><span class="n">fd</span><span class="p">);</span>
+	        <span class="n">anetEnableTcpNoDelay</span><span class="p">(</span><span class="no">NULL</span><span class="p">,</span><span class="n">fd</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">tcpkeepalive</span><span class="p">)</span>
+	            <span class="n">anetKeepAlive</span><span class="p">(</span><span class="no">NULL</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="n">server</span><span class="p">.</span><span class="nf">tcpkeepalive</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">aeCreateFileEvent</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">el</span><span class="p">,</span><span class="n">fd</span><span class="p">,</span><span class="no">AE_READABLE</span><span class="p">,</span>
+	            <span class="n">readQueryFromClient</span><span class="p">,</span> <span class="n">c</span><span class="p">)</span> <span class="o">==</span> <span class="no">AE_ERR</span><span class="p">)</span>
+	        <span class="p">{</span>
+	            <span class="n">close</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span>
+	            <span class="n">zfree</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+	            <span class="k">return</span> <span class="no">NULL</span><span class="p">;</span>
+	        <span class="p">}</span>
+		<span class="p">}</span>
+		<span class="sr">/* 对客户端其他信息的初始化 */</span>
+	    <span class="o">...</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>而在创建客户端时，就会创建文件事件，将套接字的 <code class="highlighter-rouge">AE_READABLE</code> 与命令请求处理器关联。如上述函数所示。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">void</span> <span class="n">readQueryFromClient</span><span class="p">(</span><span class="n">aeEventLoop</span> <span class="o">*</span><span class="n">el</span><span class="p">,</span> <span class="n">int</span> <span class="n">fd</span><span class="p">,</span> <span class="n">void</span> <span class="o">*</span><span class="n">privdata</span><span class="p">,</span> <span class="n">int</span> <span class="n">mask</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span> <span class="o">=</span> <span class="p">(</span><span class="n">redisClient</span><span class="o">*</span><span class="p">)</span> <span class="n">privdata</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">nread</span><span class="p">,</span> <span class="n">readlen</span><span class="p">;</span>
+	    <span class="n">size_t</span> <span class="n">qblen</span><span class="p">;</span>
+	    <span class="no">REDIS_NOTUSED</span><span class="p">(</span><span class="n">el</span><span class="p">);</span>
+	    <span class="no">REDIS_NOTUSED</span><span class="p">(</span><span class="n">mask</span><span class="p">);</span>
+	
+	    <span class="n">server</span><span class="p">.</span><span class="nf">current_client</span> <span class="o">=</span> <span class="n">c</span><span class="p">;</span>
+	    <span class="n">readlen</span> <span class="o">=</span> <span class="no">REDIS_IOBUF_LEN</span><span class="p">;</span>
+	    <span class="sr">/* If this is a multi bulk request, and we are processing a bulk reply
+	     * that is large enough, try to maximize the probability that the query
+	     * buffer contains exactly the SDS string representing the object, even
+	     * at the risk of requiring more read(2) calls. This way the function
+	     * processMultiBulkBuffer() can avoid copying buffers to create the
+	     * Redis Object representing the argument. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">reqtype</span> <span class="o">==</span> <span class="no">REDIS_REQ_MULTIBULK</span> <span class="o">&amp;&amp;</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">multibulklen</span> <span class="o">&amp;&amp;</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">bulklen</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span>
+	        <span class="o">&amp;&amp;</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">bulklen</span> <span class="o">&gt;=</span> <span class="no">REDIS_MBULK_BIG_ARG</span><span class="p">)</span>
+	    <span class="p">{</span>
+	        <span class="n">int</span> <span class="n">remaining</span> <span class="o">=</span> <span class="p">(</span><span class="n">unsigned</span><span class="p">)(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">bulklen</span><span class="o">+</span><span class="mi">2</span><span class="p">)</span><span class="o">-</span><span class="n">sdslen</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span><span class="p">);</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="n">remaining</span> <span class="o">&lt;</span> <span class="n">readlen</span><span class="p">)</span> <span class="n">readlen</span> <span class="o">=</span> <span class="n">remaining</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="n">qblen</span> <span class="o">=</span> <span class="n">sdslen</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span><span class="p">);</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf_peak</span> <span class="o">&lt;</span> <span class="n">qblen</span><span class="p">)</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf_peak</span> <span class="o">=</span> <span class="n">qblen</span><span class="p">;</span>
+	    <span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span> <span class="o">=</span> <span class="n">sdsMakeRoomFor</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span><span class="p">,</span> <span class="n">readlen</span><span class="p">);</span>
+	    <span class="n">nread</span> <span class="o">=</span> <span class="n">read</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span><span class="o">+</span><span class="n">qblen</span><span class="p">,</span> <span class="n">readlen</span><span class="p">);</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">nread</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">errno</span> <span class="o">==</span> <span class="no">EAGAIN</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">nread</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_VERBOSE</span><span class="p">,</span> <span class="s2">"Reading from client: %s"</span><span class="p">,</span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">));</span>
+	            <span class="n">freeClient</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+	            <span class="k">return</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">nread</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_VERBOSE</span><span class="p">,</span> <span class="s2">"Client closed connection"</span><span class="p">);</span>
+	        <span class="n">freeClient</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+	        <span class="k">return</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">nread</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">sdsIncrLen</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span><span class="p">,</span><span class="n">nread</span><span class="p">);</span>
+	        <span class="n">c</span><span class="o">-&gt;</span><span class="n">lastinteraction</span> <span class="o">=</span> <span class="n">server</span><span class="p">.</span><span class="nf">unixtime</span><span class="p">;</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_MASTER</span><span class="p">)</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">reploff</span> <span class="o">+=</span> <span class="n">nread</span><span class="p">;</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">stat_net_input_bytes</span> <span class="o">+=</span> <span class="n">nread</span><span class="p">;</span>
+	    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">current_client</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	        <span class="k">return</span><span class="p">;</span>
+	    <span class="p">}</span>
+		<span class="sr">/* 如果缓冲区超出最大范围，关闭该客户端 */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">sdslen</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">server</span><span class="p">.</span><span class="nf">client_max_querybuf_len</span><span class="p">)</span> <span class="p">{</span>	<span class="sr">//m</span><span class="n">ax</span> <span class="n">query</span> <span class="n">buf</span> <span class="n">is</span> <span class="mi">1</span><span class="no">GB</span>
+	        <span class="n">sds</span> <span class="n">ci</span> <span class="o">=</span> <span class="n">catClientInfoString</span><span class="p">(</span><span class="n">sdsempty</span><span class="p">(),</span><span class="n">c</span><span class="p">),</span> <span class="n">bytes</span> <span class="o">=</span> <span class="n">sdsempty</span><span class="p">();</span>
+	
+	        <span class="n">bytes</span> <span class="o">=</span> <span class="n">sdscatrepr</span><span class="p">(</span><span class="n">bytes</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span><span class="p">,</span><span class="mi">64</span><span class="p">);</span>
+	        <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span><span class="s2">"Closing client that reached max query buffer length: %s (qbuf initial bytes: %s)"</span><span class="p">,</span> <span class="n">ci</span><span class="p">,</span> <span class="n">bytes</span><span class="p">);</span>
+	        <span class="n">sdsfree</span><span class="p">(</span><span class="n">ci</span><span class="p">);</span>
+	        <span class="n">sdsfree</span><span class="p">(</span><span class="n">bytes</span><span class="p">);</span>
+	        <span class="n">freeClient</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+	        <span class="k">return</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="n">processInputBuffer</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>	<span class="sr">//</span><span class="err">解析</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span> <span class="err">中的参数，以</span><span class="n">redisStringObject</span><span class="err">的方式放入</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span> <span class="err">数组中</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">current_client</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p><code class="highlighter-rouge">readQueryFromClient</code> 函数，读取客户端发送的命令请求，存放在 <code class="highlighter-rouge">c-&gt;querybuf</code> 中，这是客户端缓冲区，最大限制为 <code class="highlighter-rouge">REDIS_MAX_QUERYBUF_LEN</code>，这个宏定义为 <code class="highlighter-rouge">redis.h</code></p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>#define REDIS_MAX_QUERYBUF_LEN  (1024*1024*1024) /* 1GB max query buffer. */ 也就是说客户端缓冲区最大为 1GB，如果超过这个大小，服务器将会关闭这个客户端。`processInputBuffer` 函数是对客户端缓冲区中的命令请求进行解析。
+</code></pre></div></div>
+
+<p><strong>命令回复处理器</strong> <br />
+负责将服务器执行命令后得到的结果通过套接字返回给客户端。底层实现为 <code class="highlighter-rouge">write</code> 函数的封装。当服务器执行命令结果需要返回给客户端的时候，服务器就会创建文件事件，将命令回复处理器和套接字的 <code class="highlighter-rouge">AE_WRITABLE</code> 类型的时间关联起来。当客户端需要接受服务器传回的结果时，就会产生 <code class="highlighter-rouge">AE_WRITABLE</code> 类型的文件事件，引发命令回复处理器执行，对套接字进行操作。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* This function is called every time we are going to transmit new data
+	 * to the client. The behavior is the following:
+	 *
+	 * If the client should receive new data (normal clients will) the function
+	 * returns REDIS_OK, and make sure to install the write handler in our event
+	 * loop so that when the socket is writable new data gets written.
+	 *
+	 * If the client should not receive new data, because it is a fake client
+	 * (used to load AOF in memory), a master or because the setup of the write
+	 * handler failed, the function returns REDIS_ERR.
+	 *
+	 * The function may return REDIS_OK without actually installing the write
+	 * event handler in the following cases:
+	 *
+	 * 1) The event handler should already be installed since the output buffer
+	 *    already contained something.
+	 * 2) The client is a slave but not yet online, so we want to just accumulate
+	 *    writes in the buffer but not actually sending them yet.
+	 *
+	 * Typically gets called every time a reply is built, before adding more
+	 * data to the clients output buffers. If the function returns REDIS_ERR no
+	 * data should be appended to the output buffers. */</span>
+	<span class="n">int</span> <span class="n">prepareClientToWrite</span><span class="p">(</span><span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="sr">/* If it's the Lua client we always return ok without installing any
+	     * handler since there is no socket at all. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_LUA_CLIENT</span><span class="p">)</span> <span class="k">return</span> <span class="no">REDIS_OK</span><span class="p">;</span>
+	
+	    <span class="sr">/* Masters don't receive replies, unless REDIS_MASTER_FORCE_REPLY flag
+	     * is set. */</span>
+	    <span class="k">if</span> <span class="p">((</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_MASTER</span><span class="p">)</span> <span class="o">&amp;&amp;</span>
+	        <span class="o">!</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_MASTER_FORCE_REPLY</span><span class="p">))</span> <span class="k">return</span> <span class="no">REDIS_ERR</span><span class="p">;</span>
+	
+	    <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">)</span> <span class="k">return</span> <span class="no">REDIS_ERR</span><span class="p">;</span> <span class="sr">/* Fake client for AOF loading. */</span>
+	
+	    <span class="sr">/* Only install the handler if not already installed and, in case of
+	     * slaves, if the client can actually receive writes. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">bufpos</span> <span class="o">==</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">listLength</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">reply</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span>
+	        <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">replstate</span> <span class="o">==</span> <span class="no">REDIS_REPL_NONE</span> <span class="o">||</span>
+	         <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">replstate</span> <span class="o">==</span> <span class="no">REDIS_REPL_ONLINE</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">repl_put_online_on_ack</span><span class="p">)))</span>
+	    <span class="p">{</span>
+	        <span class="sr">/* Try to install the write handler. */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">aeCreateFileEvent</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">el</span><span class="p">,</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">fd</span><span class="p">,</span> <span class="no">AE_WRITABLE</span><span class="p">,</span>
+	                <span class="n">sendReplyToClient</span><span class="p">,</span> <span class="n">c</span><span class="p">)</span> <span class="o">==</span> <span class="no">AE_ERR</span><span class="p">)</span>
+	        <span class="p">{</span>
+	            <span class="n">freeClientAsync</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+	            <span class="k">return</span> <span class="no">REDIS_ERR</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Authorize the caller to queue in the output buffer of this client. */</span>
+	    <span class="k">return</span> <span class="no">REDIS_OK</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p><code class="highlighter-rouge">sendReplyToClient</code> 函数就是将命令结果返回到客户端</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">void</span> <span class="n">sendReplyToClient</span><span class="p">(</span><span class="n">aeEventLoop</span> <span class="o">*</span><span class="n">el</span><span class="p">,</span> <span class="n">int</span> <span class="n">fd</span><span class="p">,</span> <span class="n">void</span> <span class="o">*</span><span class="n">privdata</span><span class="p">,</span> <span class="n">int</span> <span class="n">mask</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span> <span class="o">=</span> <span class="n">privdata</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">nwritten</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="n">totwritten</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="n">objlen</span><span class="p">;</span>
+	    <span class="n">size_t</span> <span class="n">objmem</span><span class="p">;</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="n">o</span><span class="p">;</span>
+	    <span class="no">REDIS_NOTUSED</span><span class="p">(</span><span class="n">el</span><span class="p">);</span>
+	    <span class="no">REDIS_NOTUSED</span><span class="p">(</span><span class="n">mask</span><span class="p">);</span>
+	
+	    <span class="k">while</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">bufpos</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="o">||</span> <span class="n">listLength</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">reply</span><span class="p">))</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">bufpos</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">nwritten</span> <span class="o">=</span> <span class="n">write</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">buf</span><span class="o">+</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">sentlen</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">bufpos</span><span class="o">-</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">sentlen</span><span class="p">);</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">nwritten</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="n">c</span><span class="o">-&gt;</span><span class="n">sentlen</span> <span class="o">+=</span> <span class="n">nwritten</span><span class="p">;</span>
+	            <span class="n">totwritten</span> <span class="o">+=</span> <span class="n">nwritten</span><span class="p">;</span>
+	
+	            <span class="sr">/* If the buffer was sent, set bufpos to zero to continue with
+	             * the remainder of the reply. */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">sentlen</span> <span class="o">==</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">bufpos</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">c</span><span class="o">-&gt;</span><span class="n">bufpos</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	                <span class="n">c</span><span class="o">-&gt;</span><span class="n">sentlen</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	            <span class="p">}</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">o</span> <span class="o">=</span> <span class="n">listNodeValue</span><span class="p">(</span><span class="n">listFirst</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">reply</span><span class="p">));</span>
+	            <span class="n">objlen</span> <span class="o">=</span> <span class="n">sdslen</span><span class="p">(</span><span class="n">o</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">);</span>
+	            <span class="n">objmem</span> <span class="o">=</span> <span class="n">getStringObjectSdsUsedMemory</span><span class="p">(</span><span class="n">o</span><span class="p">);</span>
+	
+	            <span class="k">if</span> <span class="p">(</span><span class="n">objlen</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">listDelNode</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">reply</span><span class="p">,</span><span class="n">listFirst</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">reply</span><span class="p">));</span>
+	                <span class="n">c</span><span class="o">-&gt;</span><span class="n">reply_bytes</span> <span class="o">-=</span> <span class="n">objmem</span><span class="p">;</span>
+	                <span class="n">continue</span><span class="p">;</span>
+	            <span class="p">}</span>
+	
+	            <span class="n">nwritten</span> <span class="o">=</span> <span class="n">write</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span> <span class="p">((</span><span class="n">char</span><span class="o">*</span><span class="p">)</span><span class="n">o</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">)</span><span class="o">+</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">sentlen</span><span class="p">,</span><span class="n">objlen</span><span class="o">-</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">sentlen</span><span class="p">);</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">nwritten</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="n">c</span><span class="o">-&gt;</span><span class="n">sentlen</span> <span class="o">+=</span> <span class="n">nwritten</span><span class="p">;</span>
+	            <span class="n">totwritten</span> <span class="o">+=</span> <span class="n">nwritten</span><span class="p">;</span>
+	
+	            <span class="sr">/* If we fully sent the object on head go to the next one */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">sentlen</span> <span class="o">==</span> <span class="n">objlen</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">listDelNode</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">reply</span><span class="p">,</span><span class="n">listFirst</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">reply</span><span class="p">));</span>
+	                <span class="n">c</span><span class="o">-&gt;</span><span class="n">sentlen</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	                <span class="n">c</span><span class="o">-&gt;</span><span class="n">reply_bytes</span> <span class="o">-=</span> <span class="n">objmem</span><span class="p">;</span>
+	            <span class="p">}</span>
+	        <span class="p">}</span>
+	        <span class="sr">/* Note that we avoid to send more than REDIS_MAX_WRITE_PER_EVENT
+	         * bytes, in a single threaded server it's a good idea to serve
+	         * other clients as well, even if a very large request comes from
+	         * super fast link that is always able to accept data (in real world
+	         * scenario think about 'KEYS *' against the loopback interface).
+	         *
+	         * However if we are over the maxmemory limit we ignore that and
+	         * just deliver as much data as it is possible to deliver. */</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">stat_net_output_bytes</span> <span class="o">+=</span> <span class="n">totwritten</span><span class="p">;</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">totwritten</span> <span class="o">&gt;</span> <span class="no">REDIS_MAX_WRITE_PER_EVENT</span> <span class="o">&amp;&amp;</span>
+	            <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">maxmemory</span> <span class="o">==</span> <span class="mi">0</span> <span class="o">||</span>
+	             <span class="n">zmalloc_used_memory</span><span class="p">()</span> <span class="o">&lt;</span> <span class="n">server</span><span class="p">.</span><span class="nf">maxmemory</span><span class="p">))</span> <span class="k">break</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">nwritten</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">errno</span> <span class="o">==</span> <span class="no">EAGAIN</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">nwritten</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_VERBOSE</span><span class="p">,</span>
+	                <span class="s2">"Error writing to client: %s"</span><span class="p">,</span> <span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">));</span>
+	            <span class="n">freeClient</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+	            <span class="k">return</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">totwritten</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="sr">/* For clients representing masters we don't count sending data
+	         * as an interaction, since we always send REPLCONF ACK commands
+	         * that take some time to just fill the socket output buffer.
+	         * We just rely on data /</span> <span class="n">pings</span> <span class="n">received</span> <span class="k">for</span> <span class="n">timeout</span> <span class="n">detection</span><span class="p">.</span> <span class="nf">*</span><span class="o">/</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_MASTER</span><span class="p">))</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">lastinteraction</span> <span class="o">=</span> <span class="n">server</span><span class="p">.</span><span class="nf">unixtime</span><span class="p">;</span>
+	    <span class="p">}</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">bufpos</span> <span class="o">==</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">listLength</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">reply</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">c</span><span class="o">-&gt;</span><span class="n">sentlen</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	        <span class="n">aeDeleteFileEvent</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">el</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">fd</span><span class="p">,</span><span class="no">AE_WRITABLE</span><span class="p">);</span>
+	
+	        <span class="sr">/* Close connection after entire reply has been sent. */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_CLOSE_AFTER_REPLY</span><span class="p">)</span> <span class="n">freeClient</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+	    <span class="p">}</span>
+	<span class="p">}</span></code></pre></figure>
+
+<h2 id="时间事件">时间事件</h2>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Time event structure */
+typedef struct aeTimeEvent {
+    long long id; /* time event identifier. , 值是递增的 */
+    long when_sec; /* seconds , 时间事件达到时间，秒精度 */
+    long when_ms; /* milliseconds, 毫秒精度 */
+    aeTimeProc *timeProc;	/* 时间事件处理函数 */
+    aeEventFinalizerProc *finalizerProc;
+    void *clientData;
+    struct aeTimeEvent *next;	/* 时间事件，以链表的形式连接 */
+} aeTimeEvent;
+</code></pre></div></div>
+
+<p>时间事件分为两种，一个是定时事件，一个是周期性事件。 <br />
+<strong>定时事件</strong>：让一段程序在指定一段时间之后执行 <br />
+<strong>周期性事件</strong>：让一段程序每隔指定时间执行一次。</p>
+
+<h3 id="创建时间事件">创建时间事件</h3>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
+        aeTimeProc *proc, void *clientData,
+        aeEventFinalizerProc *finalizerProc)
+{
+    long long id = eventLoop-&gt;timeEventNextId++;
+    aeTimeEvent *te;
+
+    te = zmalloc(sizeof(*te));
+    if (te == NULL) return AE_ERR;
+    te-&gt;id = id;
+    aeAddMillisecondsToNow(milliseconds,&amp;te-&gt;when_sec,&amp;te-&gt;when_ms);
+    te-&gt;timeProc = proc;
+    te-&gt;finalizerProc = finalizerProc;
+    te-&gt;clientData = clientData;
+    te-&gt;next = eventLoop-&gt;timeEventHead;	//strat from zero
+    eventLoop-&gt;timeEventHead = te;
+    return id;
+}
+</code></pre></div></div>
+
+<p><code class="highlighter-rouge">milliseconds</code>：是多久之后执行时间事件的参数 <br />
+<code class="highlighter-rouge">id</code>：是时间事件的唯一 id 标识，从 0 开始计数 <br /></p>
+
+<p><code class="highlighter-rouge">aeAddMillisecondsToNow</code> 函数用于更新时间事件的 when_sec 和 when_ms 变量，即用当前时间加上 milliseconds 转换的时间，表示 milliseconds 时间之后将会执行该时间事件。</p>
+
+<h3 id="删除时间事件">删除时间事件</h3>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id)
+{
+    aeTimeEvent *te, *prev = NULL;
+
+    te = eventLoop-&gt;timeEventHead;
+    while(te) {
+        if (te-&gt;id == id) {
+            if (prev == NULL)
+                eventLoop-&gt;timeEventHead = te-&gt;next;
+            else
+                prev-&gt;next = te-&gt;next;
+            if (te-&gt;finalizerProc)
+                te-&gt;finalizerProc(eventLoop, te-&gt;clientData);
+            zfree(te);
+            return AE_OK;
+        }
+        prev = te;
+        te = te-&gt;next;
+    }
+    return AE_ERR; /* NO event with the specified ID found */
+}
+</code></pre></div></div>
+
+<p>在 redis 中，多个时间事件是通过单链表连接起来的，链表头结点为 <code class="highlighter-rouge">eventLoop-&gt;timeEventHead</code>，删除时间事件时，先通过 id 找到时间事件，然后在单链表中删除该节点。</p>
+
+<h3 id="查找当前时间最近的时间事件">查找当前时间最近的时间事件</h3>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Search the first timer to fire.
+ * This operation is useful to know how many time the select can be
+ * put in sleep without to delay any event.
+ * If there are no timers NULL is returned.
+ *
+ * Note that's O(N) since time events are unsorted.
+ * Possible optimizations (not needed by Redis so far, but...):
+ * 1) Insert the event in order, so that the nearest is just the head.
+ *    Much better but still insertion or deletion of timers is O(N).
+ * 2) Use a skiplist to have this operation as O(1) and insertion as O(log(N)).
+ */
+static aeTimeEvent *aeSearchNearestTimer(aeEventLoop *eventLoop)
+{
+    aeTimeEvent *te = eventLoop-&gt;timeEventHead;
+    aeTimeEvent *nearest = NULL;
+
+    while(te) {
+        if (!nearest || te-&gt;when_sec &lt; nearest-&gt;when_sec ||
+                (te-&gt;when_sec == nearest-&gt;when_sec &amp;&amp;
+                 te-&gt;when_ms &lt; nearest-&gt;when_ms))
+            nearest = te;
+        te = te-&gt;next;
+    }
+    return nearest;
+}
+</code></pre></div></div>
+
+<p>当创建一个时间事件时，将该事件加入到时间事件单链表中，查找链表中离当前时间最近的事件，需要扫描整个链表，类似于一次冒泡排序。</p>
+
+<h3 id="时间事件的调度">时间事件的调度</h3>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Process time events */</span>
+	<span class="n">static</span> <span class="n">int</span> <span class="n">processTimeEvents</span><span class="p">(</span><span class="n">aeEventLoop</span> <span class="o">*</span><span class="n">eventLoop</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">int</span> <span class="n">processed</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="n">aeTimeEvent</span> <span class="o">*</span><span class="n">te</span><span class="p">;</span>
+	    <span class="n">long</span> <span class="n">long</span> <span class="n">maxId</span><span class="p">;</span>
+	    <span class="n">time_t</span> <span class="n">now</span> <span class="o">=</span> <span class="n">time</span><span class="p">(</span><span class="no">NULL</span><span class="p">);</span>
+	
+	    <span class="sr">/* If the system clock is moved to the future, and then set back to the
+	     * right value, time events may be delayed in a random way. Often this
+	     * means that scheduled operations will not be performed soon enough.
+	     *
+	     * Here we try to detect system clock skews, and force all the time
+	     * events to be processed ASAP when this happens: the idea is that
+	     * processing events earlier is less dangerous than delaying them
+	     * indefinitely, and practice suggests it is. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">now</span> <span class="o">&lt;</span> <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">lastTime</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">te</span> <span class="o">=</span> <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">timeEventHead</span><span class="p">;</span>
+	        <span class="k">while</span><span class="p">(</span><span class="n">te</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">te</span><span class="o">-&gt;</span><span class="n">when_sec</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	            <span class="n">te</span> <span class="o">=</span> <span class="n">te</span><span class="o">-&gt;</span><span class="k">next</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	    <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">lastTime</span> <span class="o">=</span> <span class="n">now</span><span class="p">;</span>
+	
+	    <span class="n">te</span> <span class="o">=</span> <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">timeEventHead</span><span class="p">;</span>
+	    <span class="n">maxId</span> <span class="o">=</span> <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">timeEventNextId</span><span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+	    <span class="k">while</span><span class="p">(</span><span class="n">te</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">long</span> <span class="n">now_sec</span><span class="p">,</span> <span class="n">now_ms</span><span class="p">;</span>
+	        <span class="n">long</span> <span class="n">long</span> <span class="nb">id</span><span class="p">;</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="n">te</span><span class="o">-&gt;</span><span class="nb">id</span> <span class="o">&gt;</span> <span class="n">maxId</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">te</span> <span class="o">=</span> <span class="n">te</span><span class="o">-&gt;</span><span class="k">next</span><span class="p">;</span>
+	            <span class="n">continue</span><span class="p">;</span>
+	        <span class="p">}</span>
+	        <span class="n">aeGetTime</span><span class="p">(</span><span class="o">&amp;</span><span class="n">now_sec</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">now_ms</span><span class="p">);</span>
+			<span class="sr">/* 判断时间事件是否到达 */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">now_sec</span> <span class="o">&gt;</span> <span class="n">te</span><span class="o">-&gt;</span><span class="n">when_sec</span> <span class="o">||</span>
+	            <span class="p">(</span><span class="n">now_sec</span> <span class="o">==</span> <span class="n">te</span><span class="o">-&gt;</span><span class="n">when_sec</span> <span class="o">&amp;&amp;</span> <span class="n">now_ms</span> <span class="o">&gt;=</span> <span class="n">te</span><span class="o">-&gt;</span><span class="n">when_ms</span><span class="p">))</span>
+	        <span class="p">{</span>
+	            <span class="n">int</span> <span class="n">retval</span><span class="p">;</span>
+	
+				<span class="sr">/* 调用时间事件处理函数 */</span>
+	            <span class="nb">id</span> <span class="o">=</span> <span class="n">te</span><span class="o">-&gt;</span><span class="nb">id</span><span class="p">;</span>
+	            <span class="n">retval</span> <span class="o">=</span> <span class="n">te</span><span class="o">-&gt;</span><span class="n">timeProc</span><span class="p">(</span><span class="n">eventLoop</span><span class="p">,</span> <span class="nb">id</span><span class="p">,</span> <span class="n">te</span><span class="o">-&gt;</span><span class="n">clientData</span><span class="p">);</span>
+	            <span class="n">processed</span><span class="o">++</span><span class="p">;</span>
+	            <span class="sr">/* After an event is processed our time event list may
+	             * no longer be the same, so we restart from head.
+	             * Still we make sure to don't process events registered
+	             * by event handlers itself in order to don't loop forever.
+	             * To do so we saved the max ID we want to handle.
+	             *
+	             * FUTURE OPTIMIZATIONS:
+	             * Note that this is NOT great algorithmically. Redis uses
+	             * a single time event so it's not a problem but the right
+	             * way to do this is to add the new elements on head, and
+	             * to flag deleted elements in a special way for later
+	             * deletion (putting references to the nodes to delete into
+	             * another linked list). */</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">retval</span> <span class="o">!=</span> <span class="no">AE_NOMORE</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">aeAddMillisecondsToNow</span><span class="p">(</span><span class="n">retval</span><span class="p">,</span><span class="o">&amp;</span><span class="n">te</span><span class="o">-&gt;</span><span class="n">when_sec</span><span class="p">,</span><span class="o">&amp;</span><span class="n">te</span><span class="o">-&gt;</span><span class="n">when_ms</span><span class="p">);</span>
+	            <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	                <span class="n">aeDeleteTimeEvent</span><span class="p">(</span><span class="n">eventLoop</span><span class="p">,</span> <span class="nb">id</span><span class="p">);</span>
+	            <span class="p">}</span>
+	            <span class="n">te</span> <span class="o">=</span> <span class="n">eventLoop</span><span class="o">-&gt;</span><span class="n">timeEventHead</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="n">te</span> <span class="o">=</span> <span class="n">te</span><span class="o">-&gt;</span><span class="k">next</span><span class="p">;</span>
+	        <span class="p">}</span>
+	    <span class="p">}</span>
+	    <span class="k">return</span> <span class="n">processed</span><span class="p">;</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>如果当前时间 now 小于 <code class="highlighter-rouge">eventloop-&gt;lastTime</code>，那么</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>if (now &lt; eventLoop-&gt;lastTime) {
+	te = eventLoop-&gt;timeEventHead;
+    while(te) {
+    	te-&gt;when_sec = 0;
+        te = te-&gt;next;
+    }
+}
+</code></pre></div></div>
+
+<p>redis 会处理整个时间链表中的所有时间事件。</p>
+
+<p>一个时间事件时定时事件还是周期性事件时根据时间处理函数的返回值来判断的：</p>
+
+<ul>
+  <li>如果返回值为 <code class="highlighter-rouge">AE_NOMORE</code>，改时间为定时事件，该事件在达到处理之后，将会被从时间事件链表中删除，不在执行</li>
+  <li>如果返回值是非 <code class="highlighter-rouge">AE_NOMORE</code> 的值，那么该事件是周期性事件，更新时间的 when_sec 和 when_ms 的值，等到下一次事件到达时继续执行。</li>
+</ul>
+
+<p><strong>目前版本的 redis 只是用周期性事件，还没有使用定时事件。</strong></p>
+
+<h3 id="时间事件的使用-servcron-事件">时间事件的使用 servCron 事件</h3>
+<p>在redis 服务器初始化时，会创建时间事件</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Create the serverCron() time event, that's our main way to process
+ * background operations. */
+if(aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
+    redisPanic("Can't create the serverCron time event.");
+    exit(1);
+}
+</code></pre></div></div>
+
+<p>该时间事件的处理函数为 <code class="highlighter-rouge">serverCron</code>。</p>
+<h1 id="服务器中的-client-状态">服务器中的 client 状态</h1>
+<p>Redis 服务器负责与多个客户端建立网络连接，处理客户端发送的命令请求，在数据库中保存客户端执行命令所产生的数据，并通过资源管理来维持服务器自身的运转。<br />
+对每个与服务器连接的客户端，服务器都为这些客户端建立了相应的结构，用于保存客户端的状态信息，以及执行相关功能时需要用到的数据结构， <code class="highlighter-rouge">redis.h/redisClient</code></p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* With multiplexing we need to take per-client state.
+ 	 * Clients are taken in a linked list. */</span>
+	<span class="n">typedef</span> <span class="n">struct</span> <span class="n">redisClient</span> <span class="p">{</span>
+	    <span class="n">uint64_t</span> <span class="nb">id</span><span class="p">;</span>            <span class="sr">/* Client incremental unique ID. */</span>
+	    <span class="n">int</span> <span class="n">fd</span><span class="p">;</span>					<span class="sr">/* socket file descriptor */</span>
+	    <span class="n">redisDb</span> <span class="o">*</span><span class="n">db</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">dictid</span><span class="p">;</span>
+	    <span class="n">robj</span> <span class="o">*</span><span class="nb">name</span><span class="p">;</span>             <span class="sr">/* As set by CLIENT SETNAME */</span>
+	    <span class="n">sds</span> <span class="n">querybuf</span><span class="p">;</span>
+	    <span class="n">size_t</span> <span class="n">querybuf_peak</span><span class="p">;</span>   <span class="sr">/* Recent (100ms or more) peak of querybuf size */</span>
+	    <span class="n">int</span> <span class="n">argc</span><span class="p">;</span>
+	    <span class="n">robj</span> <span class="o">**</span><span class="n">argv</span><span class="p">;</span>
+	    <span class="n">struct</span> <span class="n">redisCommand</span> <span class="o">*</span><span class="n">cmd</span><span class="p">,</span> <span class="o">*</span><span class="n">lastcmd</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">reqtype</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">multibulklen</span><span class="p">;</span>       <span class="sr">/* number of multi bulk arguments left to read */</span>
+	    <span class="n">long</span> <span class="n">bulklen</span><span class="p">;</span>           <span class="sr">/* length of bulk argument in multi bulk request */</span>
+	    <span class="n">list</span> <span class="o">*</span><span class="n">reply</span><span class="p">;</span>
+	    <span class="n">unsigned</span> <span class="n">long</span> <span class="n">reply_bytes</span><span class="p">;</span> <span class="sr">/* Tot bytes of objects in reply list */</span>
+	    <span class="n">int</span> <span class="n">sentlen</span><span class="p">;</span>            <span class="sr">/* Amount of bytes already sent in the current
+	                               buffer or object being sent. */</span>
+	    <span class="n">time_t</span> <span class="n">ctime</span><span class="p">;</span>           <span class="sr">/* Client creation time */</span>
+	    <span class="n">time_t</span> <span class="n">lastinteraction</span><span class="p">;</span> <span class="sr">/* time of the last interaction, used for timeout */</span>
+	    <span class="n">time_t</span> <span class="n">obuf_soft_limit_reached_time</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">flags</span><span class="p">;</span>              <span class="sr">/* REDIS_SLAVE | REDIS_MONITOR | REDIS_MULTI ... */</span>
+	    <span class="n">int</span> <span class="n">authenticated</span><span class="p">;</span>      <span class="sr">/* when requirepass is non-NULL */</span>
+	    <span class="n">int</span> <span class="n">replstate</span><span class="p">;</span>          <span class="sr">/* replication state if this is a slave */</span>
+	    <span class="n">int</span> <span class="n">repl_put_online_on_ack</span><span class="p">;</span> <span class="sr">/* Install slave write handler on ACK. */</span>
+	    <span class="n">int</span> <span class="n">repldbfd</span><span class="p">;</span>           <span class="sr">/* replication DB file descriptor */</span>
+	    <span class="n">off_t</span> <span class="n">repldboff</span><span class="p">;</span>        <span class="sr">/* replication DB file offset */</span>
+	    <span class="n">off_t</span> <span class="n">repldbsize</span><span class="p">;</span>       <span class="sr">/* replication DB file size */</span>
+	    <span class="n">sds</span> <span class="n">replpreamble</span><span class="p">;</span>       <span class="sr">/* replication DB preamble. */</span>
+	    <span class="n">long</span> <span class="n">long</span> <span class="n">reploff</span><span class="p">;</span>      <span class="sr">/* replication offset if this is our master */</span>
+	    <span class="n">long</span> <span class="n">long</span> <span class="n">repl_ack_off</span><span class="p">;</span> <span class="sr">/* replication ack offset, if this is a slave */</span>
+	    <span class="n">long</span> <span class="n">long</span> <span class="n">repl_ack_time</span><span class="p">;</span><span class="sr">/* replication ack time, if this is a slave */</span>
+	    <span class="n">long</span> <span class="n">long</span> <span class="n">psync_initial_offset</span><span class="p">;</span> <span class="sr">/* FULLRESYNC reply offset other slaves
+	                                       copying this slave output buffer
+	                                       should use. */</span>
+	    <span class="n">char</span> <span class="n">replrunid</span><span class="p">[</span><span class="no">REDIS_RUN_ID_SIZE</span><span class="o">+</span><span class="mi">1</span><span class="p">];</span> <span class="sr">/* master run id if this is a master */</span>
+	    <span class="n">int</span> <span class="n">slave_listening_port</span><span class="p">;</span> <span class="sr">/* As configured with: SLAVECONF listening-port */</span>
+	    <span class="n">int</span> <span class="n">slave_capa</span><span class="p">;</span>         <span class="sr">/* Slave capabilities: SLAVE_CAPA_* bitwise OR. */</span>
+	    <span class="n">multiState</span> <span class="n">mstate</span><span class="p">;</span>      <span class="sr">/* MULTI/</span><span class="no">EXEC</span> <span class="n">state</span> <span class="o">*</span><span class="sr">/
+	    int btype;              /</span><span class="o">*</span> <span class="no">Type</span> <span class="n">of</span> <span class="n">blocking</span> <span class="n">op</span> <span class="k">if</span> <span class="no">REDIS_BLOCKED</span><span class="p">.</span> <span class="nf">*</span><span class="o">/</span>
+	    <span class="n">blockingState</span> <span class="n">bpop</span><span class="p">;</span>     <span class="sr">/* blocking state */</span>
+	    <span class="n">long</span> <span class="n">long</span> <span class="n">woff</span><span class="p">;</span>         <span class="sr">/* Last write global replication offset. */</span>
+	    <span class="n">list</span> <span class="o">*</span><span class="n">watched_keys</span><span class="p">;</span>     <span class="sr">/* Keys WATCHED for MULTI/</span><span class="no">EXEC</span> <span class="no">CAS</span> <span class="o">*</span><span class="sr">/
+	    dict *pubsub_channels;  /</span><span class="o">*</span> <span class="n">channels</span> <span class="n">a</span> <span class="n">client</span> <span class="n">is</span> <span class="n">interested</span> <span class="k">in</span> <span class="p">(</span><span class="no">SUBSCRIBE</span><span class="p">)</span> <span class="o">*</span><span class="sr">/
+	    list *pubsub_patterns;  /</span><span class="o">*</span> <span class="n">patterns</span> <span class="n">a</span> <span class="n">client</span> <span class="n">is</span> <span class="n">interested</span> <span class="k">in</span> <span class="p">(</span><span class="no">SUBSCRIBE</span><span class="p">)</span> <span class="o">*</span><span class="sr">/
+	    sds peerid;             /</span><span class="o">*</span> <span class="no">Cached</span> <span class="n">peer</span> <span class="no">ID</span><span class="p">.</span> <span class="nf">*</span><span class="o">/</span>
+	
+	    <span class="sr">/* Response buffer */</span>
+	    <span class="n">int</span> <span class="n">bufpos</span><span class="p">;</span>
+	    <span class="n">char</span> <span class="n">buf</span><span class="p">[</span><span class="no">REDIS_REPLY_CHUNK_BYTES</span><span class="p">];</span>	<span class="sr">/* 16K output buffer, soft limit */</span>
+	<span class="p">}</span> <span class="n">redisClient</span><span class="p">;</span></code></pre></figure>
+
+<ol>
+  <li><code class="highlighter-rouge">fd</code> ： 套接字文件描述符 <br /></li>
+  <li><code class="highlighter-rouge">name</code> ： 客户端的名字，是一个 redisObject 对象，redisStringObject 对象 <br /></li>
+  <li><code class="highlighter-rouge">db</code> ： 客户端使用的数据库的指针 <br /></li>
+  <li><code class="highlighter-rouge">argc, argv, cmd, lastcmd</code> ： 客户端命令参数及指向执行命令的函数指针 <br /></li>
+  <li><code class="highlighter-rouge">flags</code> ： 客户端的标识，记录了客户端的角色以及目前客户端的状态 <br /></li>
+  <li><code class="highlighter-rouge">querybuf, buf</code> ： 输入和输出缓冲区 <br /></li>
+  <li><code class="highlighter-rouge">ctime</code> ： 客户端创建时间 <br /></li>
+  <li><code class="highlighter-rouge">lastinteraction</code> ： 客户端与服务器最后一次通信时间 <br /></li>
+  <li><code class="highlighter-rouge">obuf_soft_limit_reached_time</code> ： 客户端输出缓冲区大小超出软性限制的时间</li>
+  <li>……</li>
+</ol>
+
+<h2 id="客户端中的几个重要属性">客户端中的几个重要属性</h2>
+<h3 id="标志-flags">标志 flags</h3>
+<p>flags 属性的值可以是单个标志：</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>flags = &lt;flag&gt;
+</code></pre></div></div>
+
+<p>也可以是多个标志的二进制：</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>flags = &lt;flag1&gt; | &lt;flag2&gt; | ...
+</code></pre></div></div>
+
+<p>redis 中客户端标志的宏定义如下所示</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Client flags */
+#define REDIS_SLAVE (1&lt;&lt;0)   /* This client is a slave server */
+#define REDIS_MASTER (1&lt;&lt;1)  /* This client is a master server */
+#define REDIS_MONITOR (1&lt;&lt;2) /* This client is a slave monitor, see MONITOR */
+#define REDIS_MULTI (1&lt;&lt;3)   /* This client is in a MULTI context */
+#define REDIS_BLOCKED (1&lt;&lt;4) /* The client is waiting in a blocking operation */
+#define REDIS_DIRTY_CAS (1&lt;&lt;5) /* Watched keys modified. EXEC will fail. */
+#define REDIS_CLOSE_AFTER_REPLY (1&lt;&lt;6) /* Close after writing entire reply. */
+#define REDIS_UNBLOCKED (1&lt;&lt;7) /* This client was unblocked and is stored in
+                                  server.unblocked_clients */
+#define REDIS_LUA_CLIENT (1&lt;&lt;8) /* This is a non connected client used by Lua ，表示客户端是专门用于处理lua脚本中包含 redis 命令的伪客户端 */
+#define REDIS_ASKING (1&lt;&lt;9)     /* Client issued the ASKING command */
+#define REDIS_CLOSE_ASAP (1&lt;&lt;10)/* Close this client ASAP */
+#define REDIS_UNIX_SOCKET (1&lt;&lt;11) /* Client connected via Unix domain socket */
+#define REDIS_DIRTY_EXEC (1&lt;&lt;12)  /* EXEC will fail for errors while queueing */
+#define REDIS_MASTER_FORCE_REPLY (1&lt;&lt;13)  /* Queue replies even if is master */
+#define REDIS_FORCE_AOF (1&lt;&lt;14)   /* Force AOF propagation of current cmd. */
+#define REDIS_FORCE_REPL (1&lt;&lt;15)  /* Force replication of current cmd. */
+#define REDIS_PRE_PSYNC (1&lt;&lt;16)   /* Instance don't understand PSYNC. */
+#define REDIS_READONLY (1&lt;&lt;17)    /* Cluster client is in read-only state. */
+#define REDIS_PUBSUB (1&lt;&lt;18)      /* Client is in Pub/Sub mode. */
+</code></pre></div></div>
+
+<h3 id="输入缓冲区-querybuf">输入缓冲区 querybuf</h3>
+<p>redis 客户端状态信息中的输入缓冲区 querybuf 用于保存客户端发送的命令请求， <code class="highlighter-rouge">readQueryFromClient</code> 这个函数就是读取客户端发送的命令请求并保存在 querybuf 中，该缓冲区的最大大小为 1GB，当超出这个值时，服务器将关闭这个客户端。</p>
+
+<h3 id="命令与命令参数-argc-argv">命令与命令参数 argc, argv</h3>
+<p>argc 表示客户端发送的命令参数的个数， argv 是一个 <code class="highlighter-rouge">redisObject</code> 结构体的数组，每一个参数就是一个 <code class="highlighter-rouge">redisObject</code> 类型的变量。当服务器读取完客户端发送的命令请求之后，通过 <code class="highlighter-rouge">Networking.c/processInlineBuffer</code> 和 <code class="highlighter-rouge">Networking.c/processMultiBulkBuffer</code> 这两个函数，将 querybuf 中的内容解析后，存放在 argv 中，argc 保存的是参数的个数。</p>
+
+<h3 id="命令实现函数-cmd-lastcmd">命令实现函数 cmd, lastcmd</h3>
+<p>当参数解析存放在 argv 中后，redis服务器会通过 argv[0] 查找命令处理函数，在 <code class="highlighter-rouge">redis.c/processCommand</code> 中</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>c-&gt;cmd = c-&gt;lastcmd = lookupCommand(c-&gt;argv[0]-&gt;ptr); 在 `redis.c/initServerConfig` 中调用 `populateCommandTable` 函数，初始化  `server.commands` 字典，通过命令名称，在字典中查找对应的命令实现函数。
+
+struct redisCommand redisCommandTable[] = {
+    {"get",getCommand,2,"rF",0,NULL,1,1,1,0,0},
+    {"set",setCommand,-3,"wm",0,NULL,1,1,1,0,0},
+    {"setnx",setnxCommand,3,"wmF",0,NULL,1,1,1,0,0},
+    {"setex",setexCommand,4,"wm",0,NULL,1,1,1,0,0},
+    {"psetex",psetexCommand,4,"wm",0,NULL,1,1,1,0,0},
+    {"append",appendCommand,3,"wm",0,NULL,1,1,1,0,0},
+    {"strlen",strlenCommand,2,"rF",0,NULL,1,1,1,0,0},
+    {"del",delCommand,-2,"w",0,NULL,1,-1,1,0,0},
+    {"exists",existsCommand,-2,"rF",0,NULL,1,-1,1,0,0},
+    {"setbit",setbitCommand,4,"wm",0,NULL,1,1,1,0,0},
+    {"getbit",getbitCommand,3,"rF",0,NULL,1,1,1,0,0},
+    {"setrange",setrangeCommand,4,"wm",0,NULL,1,1,1,0,0},
+    ...
+};
+</code></pre></div></div>
+
+<h3 id="输出缓冲区">输出缓冲区</h3>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Response buffer */
+    int bufpos;
+    char buf[REDIS_REPLY_CHUNK_BYTES];	/* 16K output buffer */
+	...
+	list *reply;
+</code></pre></div></div>
+
+<p>服务器执行命令结果会保存在输出缓冲区，每一个客户端都会有两个缓冲区，一个固定大小的缓冲区和一个可变大小的缓冲区。</p>
+
+<ul>
+  <li>固定大小的缓冲区用于保存长度较小的结果，比如 OK、整数值、错误回复、简短的字符串值等。</li>
+  <li>可变大小的缓冲区用于保存那些长度比较大的结果，比如包含了很多元素的集合或者一个非常大的字符串值等。</li>
+</ul>
+
+<p>在固定大小的缓冲区中，buf 长度最大为 16K，bufpos 为实际使用的字节数。</p>
+
+<p>可变大小的缓冲区由 reply 链表组成，这是一个双向链表。链表长度不受 16KB 的限制。</p>
+
+<h3 id="验证-authenticated">验证 authenticated</h3>
+<p>客户端的 <code class="highlighter-rouge">authenticated</code> 属性，用于记录客户端是否通过验证。如果值为0，表示未通过验证；如果为1，表示通过。</p>
+
+<p>当 <code class="highlighter-rouge">authenticated</code> 的值为0时，客户端发送的命令除了 <code class="highlighter-rouge">AUTH</code> 之外，其余的所有命令将都会被服务器拒绝执行。</p>
+
+<p><code class="highlighter-rouge">authenticated</code> 属性只有在服务器启用了身份验证功能时使用，在 <code class="highlighter-rouge">redis.config</code> 配置文件中通过设置 <code class="highlighter-rouge">requirepass</code> 选项可以设置该功能。如果没有启动身份验证功能，及时 <code class="highlighter-rouge">authenticated</code> 的值为0，服务器也不会拒绝客户端的命令请求。</p>
+
+<h1 id="服务器实现的细节--rediscmain-">服务器实现的细节 ( redis.c/main )</h1>
+<p>redis 服务器启动时，需要做很多准备工作</p>
+
+<ol>
+  <li>设置编码 <code class="highlighter-rouge">setlocale(LC_COLLATE,"");</code> <br /></li>
+  <li>设置线程安全模式 <code class="highlighter-rouge">zmalloc_enable_thread_safeness();</code> <br /></li>
+  <li>设置 OOM 异常处理方法 <code class="highlighter-rouge">zmalloc_set_oom_handler(redisOutOfMemoryHandler);</code> <br /></li>
+  <li>设置哈希种子 <code class="highlighter-rouge">dictSetHashFunctionSeed(tv.tv_sec^tv.tv_usec^getpid())</code> <br /></li>
+  <li>检查服务器是否是以 Sentinel Mode 的方式启动 <code class="highlighter-rouge">checkForSentinelMode(argc,argv)</code> <br /></li>
+  <li>读取 redis.config 配置文件，初始化服务器配置 <code class="highlighter-rouge">initServerConfig()</code> <br /></li>
+  <li>初始化服务器参数 <code class="highlighter-rouge">initServer()</code> <br /></li>
+  <li>启动服务器守护进程模式 <code class="highlighter-rouge">daemonize()</code> <br /></li>
+  <li>创建 pid 文件 <code class="highlighter-rouge">createPidFile()</code> <br /></li>
+  <li>进入主循环 <code class="highlighter-rouge">aeMain()</code></li>
+</ol>
+
+<h2 id="初始化服务器">初始化服务器</h2>
+<p>server 是一个全局变量，在 <code class="highlighter-rouge">redis.c</code> 中定义</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Global vars */
+struct redisServer server; /* server global state */
+</code></pre></div></div>
+
+<h3 id="初始化服务器状态结构">初始化服务器状态结构</h3>
+<p>在 <code class="highlighter-rouge">redis.c/initServerConfig()</code> 函数中，对 <code class="highlighter-rouge">server</code> 变量进行了初始化</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>void initServerConfig(void) {
+    int j;
+
+    getRandomHexChars(server.runid,REDIS_RUN_ID_SIZE);	//get redis "Run ID" by SHA algorithm, to keep every redis "Run ID" are different
+    server.configfile = NULL;	//配置文件
+    server.hz = REDIS_DEFAULT_HZ;	//服务器频率
+    server.runid[REDIS_RUN_ID_SIZE] = '\0';
+    server.arch_bits = (sizeof(long) == 8) ? 64 : 32;	//服务器运行架构
+    server.port = REDIS_SERVERPORT;		//默认端口，一般是6379
+    server.tcp_backlog = REDIS_TCP_BACKLOG;	//默认监听队列长度
+	...
+	server.lruclock = getLRUClock();	//初始化LRU时钟
+	...
+	populateCommandTable();		//创建命令表
+	..
+}
+</code></pre></div></div>
+
+<p><code class="highlighter-rouge">getRandomHexChars</code> 函数是通过 SHA1 算法获取 server 的 runid，摆正 runid 的唯一性，在 redis 注释中也有如下说明</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Generate the Redis "Run ID", a SHA1-sized random number that identifies a
+ * given execution of Redis, so that if you are talking with an instance
+ * having run_id == A, and you reconnect and it has run_id == B, you can be
+ * sure that it is either a different instance or it was restarted. */
+</code></pre></div></div>
+
+<p><code class="highlighter-rouge">initServerConfig</code> 函数只创建了服务器状态的一些基本属性参数，比如整数、浮点数和字符串属性，但是对数据库、Lua环境、共享对象、慢查询日志这些数据结构的初始化并没有创建，这些将在后面实现。</p>
+
+<h3 id="载入配置选项">载入配置选项</h3>
+<p>redis 服务器启动时，一般会指定配置文件，如果没有指定配置文件参数，系统谁使用默认的配置文件，比如 <code class="highlighter-rouge">redis.config</code></p>
+
+<p>服务器通过 <code class="highlighter-rouge">loadServerConfig</code> 函数加载配置文件</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Load the server configuration from the specified filename.
+	 * The function appends the additional configuration directives stored
+	 * in the 'options' string to the config file before loading.
+	 *
+	 * Both filename and options can be NULL, in such a case are considered
+	 * empty. This way loadServerConfig can be used to just load a file or
+	 * just load a string. */</span>
+	<span class="n">void</span> <span class="n">loadServerConfig</span><span class="p">(</span><span class="n">char</span> <span class="o">*</span><span class="n">filename</span><span class="p">,</span> <span class="n">char</span> <span class="o">*</span><span class="n">options</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">sds</span> <span class="n">config</span> <span class="o">=</span> <span class="n">sdsempty</span><span class="p">();</span>
+	    <span class="n">char</span> <span class="n">buf</span><span class="p">[</span><span class="no">REDIS_CONFIGLINE_MAX</span><span class="o">+</span><span class="mi">1</span><span class="p">];</span>
+	
+	    <span class="sr">/* Load the file content */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">filename</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="no">FILE</span> <span class="o">*</span><span class="n">fp</span><span class="p">;</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="n">filename</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'-'</span> <span class="o">&amp;&amp;</span> <span class="n">filename</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'\0'</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">fp</span> <span class="o">=</span> <span class="n">stdin</span><span class="p">;</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+	            <span class="k">if</span> <span class="p">((</span><span class="n">fp</span> <span class="o">=</span> <span class="n">fopen</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span><span class="s2">"r"</span><span class="p">))</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span>
+	                    <span class="s2">"Fatal error, can't open config file '%s'"</span><span class="p">,</span> <span class="n">filename</span><span class="p">);</span>
+	                <span class="nb">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+	            <span class="p">}</span>
+	        <span class="p">}</span>
+	        <span class="k">while</span><span class="p">(</span><span class="n">fgets</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="no">REDIS_CONFIGLINE_MAX</span><span class="o">+</span><span class="mi">1</span><span class="p">,</span><span class="n">fp</span><span class="p">)</span> <span class="o">!=</span> <span class="no">NULL</span><span class="p">)</span>
+	            <span class="n">config</span> <span class="o">=</span> <span class="n">sdscat</span><span class="p">(</span><span class="n">config</span><span class="p">,</span><span class="n">buf</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">fp</span> <span class="o">!=</span> <span class="n">stdin</span><span class="p">)</span> <span class="n">fclose</span><span class="p">(</span><span class="n">fp</span><span class="p">);</span>
+	    <span class="p">}</span>
+	    <span class="sr">/* Append the additional options */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">options</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">config</span> <span class="o">=</span> <span class="n">sdscat</span><span class="p">(</span><span class="n">config</span><span class="p">,</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">);</span>
+	        <span class="n">config</span> <span class="o">=</span> <span class="n">sdscat</span><span class="p">(</span><span class="n">config</span><span class="p">,</span><span class="n">options</span><span class="p">);</span>
+	    <span class="p">}</span>
+	    <span class="n">loadServerConfigFromString</span><span class="p">(</span><span class="n">config</span><span class="p">);</span>
+	    <span class="n">sdsfree</span><span class="p">(</span><span class="n">config</span><span class="p">);</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p><code class="highlighter-rouge">loadServerConfig</code> 函数将配置文件全部加载到 config 变量中，整个文件的参数都加载到 config 字符串变量中，此时，config 是一个很长很长的字符串变量，然后通过 <code class="highlighter-rouge">loadServerConfigFromSrting</code> 函数，将 config 进行分割，并对 server 中的相关参数进行赋值。</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">void</span> <span class="n">loadServerConfigFromString</span><span class="p">(</span><span class="n">char</span> <span class="o">*</span><span class="n">config</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">char</span> <span class="o">*</span><span class="n">err</span> <span class="o">=</span> <span class="no">NULL</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">linenum</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="n">totlines</span><span class="p">,</span> <span class="n">i</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">slaveof_linenum</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	    <span class="n">sds</span> <span class="o">*</span><span class="n">lines</span><span class="p">;</span>
+	
+	    <span class="n">lines</span> <span class="o">=</span> <span class="n">sdssplitlen</span><span class="p">(</span><span class="n">config</span><span class="p">,</span><span class="n">strlen</span><span class="p">(</span><span class="n">config</span><span class="p">),</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="o">&amp;</span><span class="n">totlines</span><span class="p">);</span>
+	
+	    <span class="k">for</span> <span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">totlines</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">sds</span> <span class="o">*</span><span class="n">argv</span><span class="p">;</span>
+	        <span class="n">int</span> <span class="n">argc</span><span class="p">;</span>
+	
+	        <span class="n">linenum</span> <span class="o">=</span> <span class="n">i</span><span class="o">+</span><span class="mi">1</span><span class="p">;</span>
+	        <span class="n">lines</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">sdstrim</span><span class="p">(</span><span class="n">lines</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="s2">" </span><span class="se">\t\r\n</span><span class="s2">"</span><span class="p">);</span>
+	
+	        <span class="sr">/* Skip comments and blank lines */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">lines</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'#'</span> <span class="o">||</span> <span class="n">lines</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s1">'\0'</span><span class="p">)</span> <span class="n">continue</span><span class="p">;</span>
+	
+	        <span class="sr">/* Split into arguments */</span>
+	        <span class="n">argv</span> <span class="o">=</span> <span class="n">sdssplitargs</span><span class="p">(</span><span class="n">lines</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="o">&amp;</span><span class="n">argc</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">argv</span> <span class="o">==</span> <span class="no">NULL</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">err</span> <span class="o">=</span> <span class="s2">"Unbalanced quotes in configuration line"</span><span class="p">;</span>
+	            <span class="n">goto</span> <span class="n">loaderr</span><span class="p">;</span>
+	        <span class="p">}</span>
+	
+	        <span class="sr">/* Skip this line if the resulting command vector is empty. */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">argc</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">sdsfreesplitres</span><span class="p">(</span><span class="n">argv</span><span class="p">,</span><span class="n">argc</span><span class="p">);</span>
+	            <span class="n">continue</span><span class="p">;</span>
+	        <span class="p">}</span>
+	        <span class="n">sdstolower</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">0</span><span class="p">]);</span>
+	
+	        <span class="sr">/* Execute config directives */</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcasecmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span><span class="s2">"timeout"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">argc</span> <span class="o">==</span> <span class="mi">2</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">server</span><span class="p">.</span><span class="nf">maxidletime</span> <span class="o">=</span> <span class="n">atoi</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">maxidletime</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">err</span> <span class="o">=</span> <span class="s2">"Invalid timeout value"</span><span class="p">;</span> <span class="n">goto</span> <span class="n">loaderr</span><span class="p">;</span>
+	            <span class="p">}</span>
+	        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcasecmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span><span class="s2">"tcp-keepalive"</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">argc</span> <span class="o">==</span> <span class="mi">2</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">server</span><span class="p">.</span><span class="nf">tcpkeepalive</span> <span class="o">=</span> <span class="n">atoi</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span>
+	            <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">tcpkeepalive</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+	                <span class="n">err</span> <span class="o">=</span> <span class="s2">"Invalid tcp-keepalive value"</span><span class="p">;</span> <span class="n">goto</span> <span class="n">loaderr</span><span class="p">;</span>
+	            <span class="p">}</span>
+			<span class="o">...</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>服务器在载入用户指定的配置选项，并对 server 状态进行更新之后，服务器就进入初始化第三个阶段 – 初始化服务器数据结构。</p>
+
+<h3 id="服务器的守护进程实现">服务器的守护进程实现</h3>
+<p>大家都知道，如何实现一个守护进程，首先需要了解守护进程的特征。</p>
+
+<ol>
+  <li>大多数守护进程都是以 root 超级用户权限运行。 <br /></li>
+  <li>所有的守护进程都没有控制终端，ps 查看的结果中终端名设置为 ? <br /></li>
+  <li>内核守护进程以无控制终端方式运行，而用户层守护进程无控制终端可能是调用 setsid 的结果。<br /></li>
+  <li>大多数用户层进程都是进程组的组长进程以及会话的首进程，同时也是这些进程组和会话中的唯一进程。 <br /></li>
+  <li>用户层守护进程的父进程是 init 进程。</li>
+</ol>
+
+<p>那么，根据以上特征，按照一定的规则就能创建守护进程，这里所说的一般都是用户层的守护进程。</p>
+
+<p>(1) 首先需要做的就是 fork 创建一个进程，然后使父进程退出(子进程成为孤儿进程)，此时，如果是在 terminal 上启动的，子进程继承父进程的属性，会继承父进程的 umask 掩码、进程组、控制终端属性等。</p>
+
+<p>(2) 父进程退出之后，使用 setsid ，新创建一个会话 session。<br />
+　　一个会话可以包含一个或多个进程组，一个进程组可以包含一个或多个进程。这些进程组可共享一个控制终端，所以该会话与控制终端相联系。控制终端与会话是一一对应的。因为父进程创建子进程，所以该子进程不可能是父进程所在进程组的组长和会话组长，使用 setsid 创建一个新的会话，此时，该进程成为这个会话的唯一进程，也是这个会话中进程组组长。 <br />
+　　setsid 函数在进程时进程组组长时会执行失败。如果执行成功，那么，因为会话与控制终端是一一对应的，此时，该进程将摆脱父进程的影响，存在一个新的进程组和会话中，并且与控制终端不相关。</p>
+
+<p>(3) 使用 <code class="highlighter-rouge">umask (0)</code>，将文件掩码清除，继承自父进程的掩码，可能会被设置为拒绝某些权限。</p>
+
+<p>(4) 将当前工作目录更改为根目录。从父进程继承来的工作目录可能挂载某一个文件系统中。因为守护进程通常是在系统引导之前一直存在的，所以如果守护进程的工作目录挂载在某一个文件系统中，该文件系统将不能被卸载。</p>
+
+<p>(5) 关闭不再需要的文件描述符。一般将 STDIN、STDOUT、STDERR都重定向到 <code class="highlighter-rouge">/dev/null</code> 空洞文件中，然后在关闭 0,1,2 文件描述符。因为守护进程不与终端设备相关联，所以输出无处显示，也无法从交互式用户那里接收输入。</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>struct rlimit rl;
+getrlimit (RLIMIT_NOFILE, &amp;rl);
+
+int j;
+for (j=0; i&lt;rl.rlim_max; i++) {
+	close (i);
+}
+
+int fd;
+if ((fd = open("/dev/null", O_RDWR, 0)) != -1) {
+	dup2(fd, STDIN_FILENO);
+	dup2(fd, STDOUT_FILENO);
+	dup2(fd, STDERR_FILENO);
+	if (fd &gt; STDERR_FILENO) close(fd);
+}
+</code></pre></div></div>
+
+<p>redis 的 <code class="highlighter-rouge">daemonize()</code> 函数的实现如下所示，实现 redis 的守护进程</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>void daemonize(void) {
+    int fd;
+
+    if (fork() != 0) exit(0); /* parent exits */
+    setsid(); /* create a new session */
+
+    /* Every output goes to /dev/null. If Redis is daemonized but
+     * the 'logfile' is set to 'stdout' in the configuration file
+     * it will not log at all. */
+    if ((fd = open("/dev/null", O_RDWR, 0)) != -1) {
+        dup2(fd, STDIN_FILENO);
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        if (fd &gt; STDERR_FILENO) close(fd);
+    }
+}
+</code></pre></div></div>
+
+<blockquote>
+  <p>参考： <br />
+《Unix 高级环境编程（第3版）》，第13章，守护进程。</p>
+  <h3 id="初始化服务器数据结构">初始化服务器数据结构</h3>
+  <p>在 <code class="highlighter-rouge">initServerConfig</code> 函数中，程序只初始化了服务器命令表这一个数据结构，其他的数据结构在 <code class="highlighter-rouge">initServer</code> 函数中进行初始化。比如：</p>
+</blockquote>
+
+<ul>
+  <li>server.clients 链表，这是一个服务器端维护客户端状态的链表，记录了客户端的参数、命令执行函数、与服务器最近交互的时间等信息。</li>
+  <li>server.db 数组，包含了服务器中的所有数据库，一般默认是 16 个数据库。</li>
+  <li>server.lua 用户执行 Lua 脚本的 Lua 环境</li>
+  <li>server.slowlog 用于保存慢查询日志</li>
+</ul>
+
+<p><strong>问题：服务器为什么在 <code class="highlighter-rouge">initServerConfig</code> 初始化状态结构，并加载完配置文件后才初始化这些数据结构呢？</strong></p>
+
+<p>这是因为，用户可以在配置文件中制定相关的配置选项参数，服务器必须先载入用户指定的配置选项，否则，当用户修改配置文件参数时，服务器就需要重新调整和修改已经创建好的数据结构。</p>
+
+<p>当然，<code class="highlighter-rouge">initServer</code> 函数还做了一些其他的操作：</p>
+
+<ul>
+  <li>为服务器设置进程信号处理器 <code class="highlighter-rouge">setupSignalHandlers()</code></li>
+  <li>
+    <p>创建共享对象 <code class="highlighter-rouge">createSharedObjects()</code>，共享对象是一个全局变量，在 <code class="highlighter-rouge">redis.c</code> 中申明</p>
+
+    <p><code class="highlighter-rouge">struct sharedObjectsStruct shared;</code> <br />
+大部分都是一些能够共享的字符串类型的对象，比如错误消息等。</p>
+  </li>
+  <li>打开服务器的监听端口 <code class="highlighter-rouge">Listen()</code>，并创建文件事件，为套接字关联连接应答处理器，等待服务器正式运行时接收客户端的连接。</li>
+  <li>创建时间事件，关联 <code class="highlighter-rouge">serverCron</code> 函数</li>
+  <li>如果AOF持久化功能打开，那么打开现有的AOF文件，如果AOF文件不存在，那么创建并打开一个新的AOF文件，为AOF写入做好准备。</li>
+</ul>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">    <span class="sr">/* Open the AOF file if needed. */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">aof_state</span> <span class="o">==</span> <span class="no">REDIS_AOF_ON</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">server</span><span class="p">.</span><span class="nf">aof_fd</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">aof_filename</span><span class="p">,</span>
+                               <span class="no">O_WRONLY</span><span class="o">|</span><span class="no">O_APPEND</span><span class="o">|</span><span class="no">O_CREAT</span><span class="p">,</span><span class="mo">0644</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">aof_fd</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">redisLog</span><span class="p">(</span><span class="no">REDIS_WARNING</span><span class="p">,</span> <span class="s2">"Can't open the append-only file: %s"</span><span class="p">,</span>
+                <span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">));</span>
+            <span class="nb">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span></code></pre></figure>
+
+<ul>
+  <li>初始化服务器后台 <code class="highlighter-rouge">I/O</code> 模块（bio），为 <code class="highlighter-rouge">I/O</code> 操作做好准备。 <code class="highlighter-rouge">bioInit()</code></li>
+</ul>
+
+<h2 id="还原数据库状态">还原数据库状态</h2>
+<p>在完成了 server 的一系列初始化之后，服务器需要载入 AOF 文件或者 RDB 文件来还原数据库的状态。但是，在载入这些文件之前，服务器还需要检查一下系统参数是否正常。</p>
+
+<h4 id="检查系统允许的套接字监听队列长度的最大值">检查系统允许的套接字监听队列长度的最大值</h4>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Check that server.tcp_backlog can be actually enforced in Linux according
+ * to the value of /proc/sys/net/core/somaxconn, or warn about it. */
+void checkTcpBacklogSettings(void) {
+#ifdef HAVE_PROC_SOMAXCONN
+    FILE *fp = fopen("/proc/sys/net/core/somaxconn","r");
+    char buf[1024];
+    if (!fp) return;
+    if (fgets(buf,sizeof(buf),fp) != NULL) {
+        int somaxconn = atoi(buf);
+        if (somaxconn &gt; 0 &amp;&amp; somaxconn &lt; server.tcp_backlog) {
+            redisLog(REDIS_WARNING,"WARNING: The TCP backlog setting of %d cannot be enforced because /proc/sys/net/core/somaxconn is set to the lower value of %d.", server.tcp_backlog, somaxconn);
+        }
+    }
+    fclose(fp);
+#endif
+}
+</code></pre></div></div>
+
+<p>对于一个TCP连接，Server 与 Client 需要通过三次握手来建立网络连接。当三次握手成功后,我们可以看到端口的状态由 LISTEN 转变为 ESTABLISHED。接着这条链路上就可以开始传送数据了。</p>
+
+<p>每一个处于监听(Listen)状态的端口,都有自己的监听队列.监听队列的长度,与如下两方面有关:</p>
+
+<ul>
+  <li>somaxconn参数，在 rhel 中，<code class="highlighter-rouge">/proc/sys/net/core/somaxconn</code></li>
+  <li>使用该端口的程序中 <code class="highlighter-rouge">listen(int sockfd, int backlog)</code> 函数.
+    <h4 id="检查内存状态">检查内存状态</h4>
+
+    <p>#ifdef <strong>linux</strong>
+  int linuxOvercommitMemoryValue(void) {
+      FILE *fp = fopen(“/proc/sys/vm/overcommit_memory”,”r”);
+      char buf[64];</p>
+
+    <div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>  if (!fp) return -1;
+  if (fgets(buf,64,fp) == NULL) {
+      fclose(fp);
+      return -1;
+  }
+  fclose(fp);
+
+  return atoi(buf);   }
+</code></pre></div>    </div>
+  </li>
+</ul>
+
+<p><code class="highlighter-rouge">overcommit_memory</code> 文件指定了内核针对内存分配的策略，其值可以是0、1、2。</p>
+
+<ul>
+  <li>0， 表示内核将检查是否有足够的可用内存供应用进程使用；如果有足够的可用内存，内存申请允许；否则，内存申请失败，并把错误返回给应用进程。</li>
+  <li>1， 表示内核允许分配所有的物理内存，而不管当前的内存状态如何。</li>
+  <li>2， 表示内核允许分配超过所有物理内存和交换空间总和的内存</li>
+</ul>
+
+<p><strong>什么是Overcommit和OOM</strong><br />
+　　Linux对大部分申请内存的请求都回复”yes”，以便能跑更多更大的程序。因为申请内存后，并不会马上使用内存。这种技术叫做Overcommit。当linux发现内存不足时，会发生OOM killer(OOM=out-of-memory)。它会选择杀死一些进程(用户态进程，不是内核线程)，以便释放内存。 <br />
+　　当 <code class="highlighter-rouge">oom-killer</code>发生时，linux会选择杀死哪些进程？选择进程的函数是<code class="highlighter-rouge">oom_badness</code> 函数(在<code class="highlighter-rouge">mm/oom_kill.c</code>中)，该函数会计算每个进程的点数(0~1000)。点数越高，这个进程越有可能被杀死。每个进程的点数跟<code class="highlighter-rouge">oom_score_adj</code> 有关，而且 <code class="highlighter-rouge">oom_score_adj</code> 可以被设置(-1000最低，1000最高)。</p>
+
+<p><strong>当 redis 中因为 <code class="highlighter-rouge">overcommit_memory</code> 系统参数出现问题时，会出现如下的日志信息</strong> <br /></p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>17 Mar 13:18:02.207 # WARNING overcommit_memory is set to 0! Background save may fail under low memory condition. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.
+
+__解决办法__ &lt;br&gt; 在 root 权限下，修改内核参数
+</code></pre></div></div>
+
+<ul>
+  <li>编辑 /etc/sysctl.conf ，改 <code class="highlighter-rouge">vm.overcommit_memory=1</code> ，然后 <code class="highlighter-rouge">sysctl -p</code>  使配置文件生效</li>
+  <li><code class="highlighter-rouge">sysctl vm.overcommit_memory=1</code></li>
+  <li><code class="highlighter-rouge">echo 1 &gt; /proc/sys/vm/overcommit_memory</code></li>
+</ul>
+
+<p><strong>在 redis 中，需要查看系统是否支持 THP</strong>，即 <code class="highlighter-rouge">Transparent Huge Page</code>(透明巨页)</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>#ifdef __linux__
+/* Returns 1 if Transparent Huge Pages support is enabled in the kernel.
+ * Otherwise (or if we are unable to check) 0 is returned. */
+/* my /sys/kernel/mm/transparent_hugepage/enabled is "[always] never", so THP is set on, if file content is [never], THP is set off */
+int THPIsEnabled(void) {
+    char buf[1024];
+
+    FILE *fp = fopen("/sys/kernel/mm/transparent_hugepage/enabled","r");
+    if (!fp) return 0;
+    if (fgets(buf,sizeof(buf),fp) == NULL) {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+    return (strstr(buf,"[never]") == NULL) ? 1 : 0;
+}
+#endif
+</code></pre></div></div>
+
+<p>　　一般而言，内存管理的最小块级单位叫做 page ，一个 page 是 4096 bytes，1M 的内存会有256个 page，1GB的话就会有256,000个 page。CPU 通过内置的内存管理单元维护着 page 表记录。 <br />
+　　现代的硬件内存管理单元最多只支持数百到上千的 page 表记录，并且，对于数百万 page 表记录的维护算法必将与目前的数百条记录的维护算法大不相同才能保证性能，目前的解决办法是，如果一个程序所需内存page数量超过了内存管理单元的处理大小，操作系统会采用软件管理的内存管理单元，但这会使程序运行的速度变慢。 <br />
+　　从redhat 6（centos，sl，ol）开始，操作系统开始支持 Huge Pages，也就是大页。 <br />
+　　简单来说， Huge Pages就是大小为 2M 到 1GB 的内存 page，主要用于管理数千兆的内存，比如 1GB 的 page 对于 1TB 的内存来说是相对比较合适的。 <br />
+　　THP（Transparent Huge Pages）是一个使管理 Huge Pages 自动化的抽象层。使用透明巨页内存的好处： <br /></p>
+
+<ol>
+  <li>可以使用swap，内存页默认是2M大小，需要使用swap的时候，内存被分割为4k大小 <br /></li>
+  <li>对用户透明，不需要用户做特殊配置 <br /></li>
+  <li>不需要root权限 <br /></li>
+  <li>不需要依某种库文件 <br /></li>
+</ol>
+
+<blockquote>
+  <p><strong>参考</strong>： <br /></p>
+  <ol>
+    <li>有关 linux 下 redis overcommit_memory 的问题 [http://blog.csdn.net/whycold/article/details/21388455] <br /></li>
+    <li>Transparent Huge Pages 相关概念及对 mysql 的影响 [https://my.oschina.net/llzx373/blog/226446] <br /></li>
+    <li>透明大页介绍 [http://www.cnblogs.com/kerrycode/archive/2015/07/23/4670931.html] <br /></li>
+  </ol>
+</blockquote>
+
+<h4 id="加载-aof-或者-rdb-文件">加载 AOF 或者 RDB 文件</h4>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/* Function called at startup to load RDB or AOF file in memory. */
+void loadDataFromDisk(void) {
+    long long start = ustime();	//get current time as seconds
+    if (server.aof_state == REDIS_AOF_ON) {
+        if (loadAppendOnlyFile(server.aof_filename) == REDIS_OK)
+            redisLog(REDIS_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
+    } else {
+        if (rdbLoad(server.rdb_filename) == REDIS_OK) {
+            redisLog(REDIS_NOTICE,"DB loaded from disk: %.3f seconds",
+                (float)(ustime()-start)/1000000);
+        } else if (errno != ENOENT) {
+            redisLog(REDIS_WARNING,"Fatal error loading the DB: %s. Exiting.",strerror(errno));
+            exit(1);
+        }
+    }
+}
+</code></pre></div></div>
+
+<p>如果服务器启用了 AOF 持久化功能，<code class="highlighter-rouge">server.aof_state == REDIS_AOF_ON</code>，服务器使用 AOF 文件来还原数据库状态；否则，服务器使用 RDB 文件来还原数据库状态。</p>
+
+<h2 id="执行事件循环">执行事件循环</h2>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>void aeMain(aeEventLoop *eventLoop) {
+    eventLoop-&gt;stop = 0;
+    while (!eventLoop-&gt;stop) {
+        if (eventLoop-&gt;beforesleep != NULL)
+            eventLoop-&gt;beforesleep(eventLoop);
+        aeProcessEvents(eventLoop, AE_ALL_EVENTS);
+    }
+}
+</code></pre></div></div>
+
+<p>事件循环，处理文件事件和时间事件。</p>
+
+<h2 id="服务器接收回复客户端的详细经过">服务器接收回复客户端的详细经过</h2>
+<p>一个命令从客户端发送到服务器，再由服务器接收执行和回复的经过，需要客户端和服务器完成一系列的操作。</p>
+
+<h3 id="命令请求的执行过程">命令请求的执行过程</h3>
+<p><img src="https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/send_and_reply.png" alt="send and reply" /> <br />
+加入客户端发送 <code class="highlighter-rouge">SET KEY REDIS</code> 命令给服务器到获得回复 OK 期间，需要共同完成以下操作： <br />
+1) 客户端向服务器发送命令请求 <br />
+2) 服务器接收到客户端发送的命令请求，执行操作，并在数据库中设置，操作成功后产生命令回复OK <br />
+3) 服务器将命令结果OK发送给客户端 <br />
+4) 客户端接收到命令回复OK，打印给用户</p>
+
+<h4 id="发送命令请求">发送命令请求</h4>
+<p>在前面的章节《redis源码分析 – cs结构分析之客户端》[http://blog.csdn.net/honglicu123/article/details/53169843]中已经介绍了客户端发送命令到服务器的细节，用户在客户端键入命令，发送到服务器时，是按照 redis 协议格式发送的。</p>
+
+<h4 id="读取命令请求">读取命令请求</h4>
+<p>当服务器初始化成功后，创建文件事件，将套接字与连接请求处理器关联，当客户端与服务器连接之后，就会创建文件事件，将套接字与命令请求处理器连接，客户端向服务器发送命令请求，触发该事件，引发命令请求处理器处理，接收客户端的命令。</p>
+
+<p>1) 读取套接字中协议格式的命令请求，并保存到客户端状态的输入缓冲区中 c-&gt;querybuf</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">void</span> <span class="n">readQueryFromClient</span><span class="p">(</span><span class="n">aeEventLoop</span> <span class="o">*</span><span class="n">el</span><span class="p">,</span> <span class="n">int</span> <span class="n">fd</span><span class="p">,</span> <span class="n">void</span> <span class="o">*</span><span class="n">privdata</span><span class="p">,</span> <span class="n">int</span> <span class="n">mask</span><span class="p">)</span> <span class="p">{</span>
+		<span class="o">...</span>
+		<span class="n">qblen</span> <span class="o">=</span> <span class="n">sdslen</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span><span class="p">);</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf_peak</span> <span class="o">&lt;</span> <span class="n">qblen</span><span class="p">)</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf_peak</span> <span class="o">=</span> <span class="n">qblen</span><span class="p">;</span>
+	    <span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span> <span class="o">=</span> <span class="n">sdsMakeRoomFor</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span><span class="p">,</span> <span class="n">readlen</span><span class="p">);</span>
+	    <span class="n">nread</span> <span class="o">=</span> <span class="n">read</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span><span class="o">+</span><span class="n">qblen</span><span class="p">,</span> <span class="n">readlen</span><span class="p">);</span>
+		<span class="o">...</span>
+		<span class="k">if</span> <span class="p">(</span><span class="n">nread</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">sdsIncrLen</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">querybuf</span><span class="p">,</span><span class="n">nread</span><span class="p">);</span>
+	        <span class="n">c</span><span class="o">-&gt;</span><span class="n">lastinteraction</span> <span class="o">=</span> <span class="n">server</span><span class="p">.</span><span class="nf">unixtime</span><span class="p">;</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_MASTER</span><span class="p">)</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">reploff</span> <span class="o">+=</span> <span class="n">nread</span><span class="p">;</span>
+	        <span class="n">server</span><span class="p">.</span><span class="nf">stat_net_input_bytes</span> <span class="o">+=</span> <span class="n">nread</span><span class="p">;</span>
+	    <span class="p">}</span>
+		<span class="o">...</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>2) 对输入缓冲区中的命令进行解析，将参数和参数个数保存在客户端状态的 argc 和 argv 中，<code class="highlighter-rouge">networking.c/processInlineBuffer</code> 和 <code class="highlighter-rouge">networking.c/processMultibulkBuffer</code> 就是完成这个操作。将redis协议格式的命令请求解析之后，每一个命令参数都生成一个 redisStringObject 类型的结构，保存在 argv 数组中。比如 <code class="highlighter-rouge">SET NAME REDIS</code> ，在客户端状态结构中将如下所示的形式存储</p>
+
+<p><img src="https://github.com/small-cat/small-cat.github.io/raw/master/_pics/redis_analysis/redisClient_getCommand.png" alt="redis client get command" /> <br />
+3) 调用命令执行函数，执行命令。</p>
+
+<p><strong>问题：命令时如何执行的呢</strong></p>
+
+<h4 id="命令执行过程">命令执行过程</h4>
+<p><strong>一、 查找命令实现函数</strong> <br />
+在服务器初始化 <code class="highlighter-rouge">initServerConfig</code> 函数中，</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Command table -- we initiialize it here as it is part of the
+	     * initial configuration, since command names may be changed via
+	     * redis.conf using the rename-command directive. */</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">commands</span> <span class="o">=</span> <span class="n">dictCreate</span><span class="p">(</span><span class="o">&amp;</span><span class="n">commandTableDictType</span><span class="p">,</span><span class="no">NULL</span><span class="p">);</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">orig_commands</span> <span class="o">=</span> <span class="n">dictCreate</span><span class="p">(</span><span class="o">&amp;</span><span class="n">commandTableDictType</span><span class="p">,</span><span class="no">NULL</span><span class="p">);</span>
+	    <span class="n">populateCommandTable</span><span class="p">();</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">delCommand</span> <span class="o">=</span> <span class="n">lookupCommandByCString</span><span class="p">(</span><span class="s2">"del"</span><span class="p">);</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">multiCommand</span> <span class="o">=</span> <span class="n">lookupCommandByCString</span><span class="p">(</span><span class="s2">"multi"</span><span class="p">);</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">lpushCommand</span> <span class="o">=</span> <span class="n">lookupCommandByCString</span><span class="p">(</span><span class="s2">"lpush"</span><span class="p">);</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">lpopCommand</span> <span class="o">=</span> <span class="n">lookupCommandByCString</span><span class="p">(</span><span class="s2">"lpop"</span><span class="p">);</span>
+	    <span class="n">server</span><span class="p">.</span><span class="nf">rpopCommand</span> <span class="o">=</span> <span class="n">lookupCommandByCString</span><span class="p">(</span><span class="s2">"rpop"</span><span class="p">);</span></code></pre></figure>
+
+<p>对命令表做了初始化，创建了命令表字典，在上面 服务器中的客户端状态 小节中有所描述。</p>
+
+<p>当需要执行命令时，首先根据客户端状态中解析出的命令参数 argv[0] 在命令表字典中查找命令实现函数</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>c-&gt;cmd = c-&gt;lastcmd = lookupCommand(c-&gt;argv[0]-&gt;ptr);
+</code></pre></div></div>
+
+<p>c-&gt;cmd 和 c-&gt;lastcmd 是 redisCommand 结构的指针</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>struct redisCommand {
+    char *name;
+    redisCommandProc *proc;
+    int arity;
+    char *sflags; /* Flags as string representation, one char per flag. */
+    int flags;    /* The actual flags, obtained from the 'sflags' field. */
+    /* Use a function to determine keys arguments in a command line.
+     * Used for Redis Cluster redirect. */
+    redisGetKeysProc *getkeys_proc;
+    /* What keys should be loaded in background when calling this command? */
+    int firstkey; /* The first argument that's a key (0 = no keys) */
+    int lastkey;  /* The last argument that's a key */
+    int keystep;  /* The step between first and last key */
+    long long microseconds, calls;
+};
+</code></pre></div></div>
+
+<p>name ：是命令的名称，比如 “SET” <br />
+proc ：是命令实现函数指针，命令SET的命令实现函数为 <code class="highlighter-rouge">setCommand</code>。<br />
+arity：命令参数的个数，用于检查命令请求的格式是否正确。如果是负值 -N，表明这个命令的参数个数大于等于N，如果是正数，就表明参数个数为N <br />
+sflags：字符串形式的标识，比如 “wrm”，这个在初始化命令字典表示，有定义</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="sr">/* Populates the Redis Command Table starting from the hard coded list
+	 * we have on top of redis.c file. */</span>
+	<span class="n">void</span> <span class="n">populateCommandTable</span><span class="p">(</span><span class="n">void</span><span class="p">)</span> <span class="p">{</span>
+	    <span class="n">int</span> <span class="n">j</span><span class="p">;</span>
+	    <span class="n">int</span> <span class="n">numcommands</span> <span class="o">=</span> <span class="n">sizeof</span><span class="p">(</span><span class="n">redisCommandTable</span><span class="p">)</span><span class="o">/</span><span class="n">sizeof</span><span class="p">(</span><span class="n">struct</span> <span class="n">redisCommand</span><span class="p">);</span>
+	
+	    <span class="k">for</span> <span class="p">(</span><span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">numcommands</span><span class="p">;</span> <span class="n">j</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">struct</span> <span class="n">redisCommand</span> <span class="o">*</span><span class="n">c</span> <span class="o">=</span> <span class="n">redisCommandTable</span><span class="o">+</span><span class="n">j</span><span class="p">;</span>
+	        <span class="n">char</span> <span class="o">*</span><span class="n">f</span> <span class="o">=</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">sflags</span><span class="p">;</span>
+	        <span class="n">int</span> <span class="n">retval1</span><span class="p">,</span> <span class="n">retval2</span><span class="p">;</span>
+	
+	        <span class="k">while</span><span class="p">(</span><span class="o">*</span><span class="n">f</span> <span class="o">!=</span> <span class="s1">'\0'</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="n">switch</span><span class="p">(</span><span class="o">*</span><span class="n">f</span><span class="p">)</span> <span class="p">{</span>
+	            <span class="k">case</span> <span class="s1">'w'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_WRITE</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'r'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_READONLY</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'m'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_DENYOOM</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'a'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_ADMIN</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'p'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_PUBSUB</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'s'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_NOSCRIPT</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'R'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_RANDOM</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'S'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_SORT_FOR_SCRIPT</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'l'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_LOADING</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'t'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_STALE</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'M'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_SKIP_MONITOR</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'k'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_ASKING</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="k">case</span> <span class="s1">'F'</span><span class="p">:</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_CMD_FAST</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="ss">default: </span><span class="n">redisPanic</span><span class="p">(</span><span class="s2">"Unsupported command flag"</span><span class="p">);</span> <span class="k">break</span><span class="p">;</span>
+	            <span class="p">}</span>
+	            <span class="n">f</span><span class="o">++</span><span class="p">;</span>
+	        <span class="p">}</span>
+	
+	        <span class="n">retval1</span> <span class="o">=</span> <span class="n">dictAdd</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">commands</span><span class="p">,</span> <span class="n">sdsnew</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="nb">name</span><span class="p">),</span> <span class="n">c</span><span class="p">);</span>
+	        <span class="sr">/* Populate an additional dictionary that will be unaffected
+	         * by rename-command statements in redis.conf. */</span>
+	        <span class="n">retval2</span> <span class="o">=</span> <span class="n">dictAdd</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="nf">orig_commands</span><span class="p">,</span> <span class="n">sdsnew</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="nb">name</span><span class="p">),</span> <span class="n">c</span><span class="p">);</span>
+	        <span class="n">redisAssert</span><span class="p">(</span><span class="n">retval1</span> <span class="o">==</span> <span class="no">DICT_OK</span> <span class="o">&amp;&amp;</span> <span class="n">retval2</span> <span class="o">==</span> <span class="no">DICT_OK</span><span class="p">);</span>
+	    <span class="p">}</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>flags：是对 sflags 分析得出的二进制标识 <br />
+calls：记录服务器执行该命令的次数 <br />
+milliseconds：记录服务器执行该命令所耗费总时长</p>
+
+<p><strong>二、命令执行前的检查工作</strong> <br /></p>
+<ol>
+  <li>检查命令实现函数是否查找成功，如果 cmd 为NULL，说明没有找到该命令的实现函数，返回客户端一个错误 “unknown command” <br /></li>
+  <li>根据 cmd 的 arity 属性，检查命令的参数格式是否正确，如果不正确，返回客户端错误信息 “wrong number of arguments for XX command” <br /></li>
+  <li>检查服务器是否启用 <code class="highlighter-rouge">requirepass</code>，如果启用检查客户端是否通过身份验证，未通过验证的客户端只能执行 AUTH 命令，其他命令，服务器将返回客户端一个错误信息 “-NOAUTH Authentication required.\r\n” <br /></li>
+  <li>如果服务器打开了 <code class="highlighter-rouge">maxmemory</code> 功能，在执行命令之前，先检查内存占用情况，在需要的情况下，会回收一部分内存。如果执行失败，将返回错误 “-OOM command not allowed when used memory &gt; ‘maxmemory’.\r\n” <br /></li>
+</ol>
+
+<p>服务器执行命令前需要做若干项检查，具体可通过阅读源码或者查看《redis 设计与实现》中的服务器章节。</p>
+
+<h4 id="调用命令实现">调用命令实现</h4>
+<p>前面的操作，服务器已经将命令参数和命令实现函数都保存在了客户端状态结构中，服务器只需要执行相应的语句即可</p>
+
+<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby">	<span class="n">void</span> <span class="n">call</span><span class="p">(</span><span class="n">redisClient</span> <span class="o">*</span><span class="n">c</span><span class="p">,</span> <span class="n">int</span> <span class="n">flags</span><span class="p">)</span> <span class="p">{</span>
+		<span class="o">...</span>
+		<span class="n">c</span><span class="o">-&gt;</span><span class="n">cmd</span><span class="o">-&gt;</span><span class="nb">proc</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+		<span class="o">...</span>
+		<span class="sr">/* Log the command into the Slow log if needed, and populate the
+	     * per-command statistics that we show in INFO commandstats. */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_CALL_SLOWLOG</span> <span class="o">&amp;&amp;</span> <span class="n">c</span><span class="o">-&gt;</span><span class="n">cmd</span><span class="o">-&gt;</span><span class="nb">proc</span> <span class="o">!=</span> <span class="n">execCommand</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">char</span> <span class="o">*</span><span class="n">latency_event</span> <span class="o">=</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">cmd</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_CMD_FAST</span><span class="p">)</span> <span class="p">?</span>
+	                              <span class="s2">"fast-command"</span> <span class="p">:</span> <span class="s2">"command"</span><span class="p">;</span>
+	        <span class="n">latencyAddSampleIfNeeded</span><span class="p">(</span><span class="n">latency_event</span><span class="p">,</span><span class="n">duration</span><span class="o">/</span><span class="mi">1000</span><span class="p">);</span>
+	        <span class="n">slowlogPushEntryIfNeeded</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span><span class="p">,</span><span class="n">duration</span><span class="p">);</span>
+	    <span class="p">}</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_CALL_STATS</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">c</span><span class="o">-&gt;</span><span class="n">cmd</span><span class="o">-&gt;</span><span class="n">microseconds</span> <span class="o">+=</span> <span class="n">duration</span><span class="p">;</span>
+	        <span class="n">c</span><span class="o">-&gt;</span><span class="n">cmd</span><span class="o">-&gt;</span><span class="n">calls</span><span class="o">++</span><span class="p">;</span>
+	    <span class="p">}</span>
+	
+	    <span class="sr">/* Propagate the command into the AOF and replication link */</span>
+	    <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_CALL_PROPAGATE</span><span class="p">)</span> <span class="p">{</span>
+	        <span class="n">int</span> <span class="n">flags</span> <span class="o">=</span> <span class="no">REDIS_PROPAGATE_NONE</span><span class="p">;</span>
+	
+	        <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_FORCE_REPL</span><span class="p">)</span> <span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_PROPAGATE_REPL</span><span class="p">;</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="no">REDIS_FORCE_AOF</span><span class="p">)</span> <span class="n">flags</span> <span class="o">|=</span> <span class="no">REDIS_PROPAGATE_AOF</span><span class="p">;</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">dirty</span><span class="p">)</span>
+	            <span class="n">flags</span> <span class="o">|=</span> <span class="p">(</span><span class="no">REDIS_PROPAGATE_REPL</span> <span class="o">|</span> <span class="no">REDIS_PROPAGATE_AOF</span><span class="p">);</span>
+	        <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">!=</span> <span class="no">REDIS_PROPAGATE_NONE</span><span class="p">)</span>
+	            <span class="n">propagate</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">cmd</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">db</span><span class="o">-&gt;</span><span class="nb">id</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span><span class="p">,</span><span class="n">flags</span><span class="p">);</span>
+	    <span class="p">}</span>
+		<span class="o">...</span>
+	<span class="p">}</span></code></pre></figure>
+
+<p>命令执行完之后，还需要做一些其他操作： <br />
+如果服务器开启了慢查询日志功能，服务器会检查是否需要为刚执行的命令添加一条慢查询日志； <br />
+更新客户端状态属性 milliseconds 和 calls 属性； <br />
+如果服务器开启了AOF，那么刚才执行的命令会被写入到AOF缓冲区；<br />
+如果其他服务器正在复制当前服务器，那么刚执行的命令会被广播给所有从服务器。</p>
+
+<h4 id="回复命令给客户端">回复命令给客户端</h4>
+<p>当命令执行完之后，如果是 set、hset类的命令，直接 addReply(“+OK\r\n”)，回复客户端</p>
+
+<p>如果是 get、hget 类的命令，需要将结果保存在客户端状态结构的输出缓冲区中，然后通过 <code class="highlighter-rouge">sendReplyToClient</code> 函数返回给客户端。</p>

@@ -1,0 +1,31 @@
+<p>本文主要是讲述在 scrapy 爬虫时，发现 Request 函数中的回调函数没有被调用的解决办法</p>
+
+<p>在 scrapy 中，</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>scrapy.Request(url, headers=self.header, callback=self.parse_detail)
+</code></pre></div></div>
+
+<p>调试的时候，发现回调函数 <code class="highlighter-rouge">parse_detail</code> 没有被调用，这可能就是被过滤掉了，查看 scrapy 的输出日志 <code class="highlighter-rouge">offsite/filtered</code> 会显示过滤的数目。这个问题如何解决呢，查看手册发现</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>https://doc.scrapy.org/en/latest/faq.html?highlight=offsite%2Ffiltered
+</code></pre></div></div>
+
+<p>这个问题，这些日志信息都是由 scrapy 中的一个 middleware 抛出的，如果没有自定义，那么这个 middleware 就是默认的 <code class="highlighter-rouge">Offsite Spider Middleware</code>，它的目的就是过滤掉哪些不在 <code class="highlighter-rouge">allowed_domains</code> 列表中的请求 requests。</p>
+
+<p>再次查看手册中关于 <code class="highlighter-rouge">OffsiteMiddleware</code> 的部分</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>https://doc.scrapy.org/en/latest/topics/spider-middleware.html#scrapy.spidermiddlewares.offsite.OffsiteMiddleware
+</code></pre></div></div>
+
+<p>两种方法能够使 requests 不被过滤: <br /></p>
+<ol>
+  <li>在 <code class="highlighter-rouge">allowed_domains</code> 中加入 url <br /></li>
+  <li>在 scrapy.Request() 函数中将参数 <code class="highlighter-rouge">dont_filter=True</code> 设置为 True <br /></li>
+</ol>
+
+<p>如下摘自手册</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>If the spider doesn’t define an allowed_domains attribute, or the attribute is empty, the offsite middleware will allow all requests.
+
+If the request has the dont_filter attribute set, the offsite middleware will allow the request even if its domain is not listed in allowed domains.
+</code></pre></div></div>
