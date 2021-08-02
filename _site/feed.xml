@@ -5,9 +5,228 @@
     <description>Coding, Startups and Ideas</description>
     <link>http://localhost:4000//</link>
     <atom:link href="http://localhost:4000//feed.xml" rel="self" type="application/rss+xml"/>
-    <pubDate>Tue, 21 Apr 2020 15:07:18 +0800</pubDate>
-    <lastBuildDate>Tue, 21 Apr 2020 15:07:18 +0800</lastBuildDate>
+    <pubDate>Mon, 31 May 2021 22:44:52 +0800</pubDate>
+    <lastBuildDate>Mon, 31 May 2021 22:44:52 +0800</lastBuildDate>
     <generator>Jekyll v4.0.0</generator>
+    
+      <item>
+        <title>cmake 编译带有版本号的动态库和链接不带版本的动态库</title>
+        <description>&lt;p&gt;cmake 中通过 &lt;code class=&quot;highlighter-rouge&quot;&gt;add_library&lt;/code&gt; 可以编译带有版本号的动态库，但是链接这个动态库时，如何指定不带有版本号的动态库名称呢，本文带你找到答案&lt;/p&gt;
+
+&lt;h1 id=&quot;cmake-编译带有版本号的动态库和链接不带版本的动态库&quot;&gt;cmake 编译带有版本号的动态库和链接不带版本的动态库&lt;/h1&gt;
+
+&lt;p&gt;cmake 中，通过 &lt;code class=&quot;highlighter-rouge&quot;&gt;add_library&lt;/code&gt; 的方式，来设置编译目标，编译结果为动态库或者静态库&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;add_library(&amp;lt;name&amp;gt; [STATIC | SHARED | MODULE]
+            [EXCLUDE_FROM_ALL]
+            [source1] [source2 ...])
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;name 就是目标名，即 &lt;code class=&quot;highlighter-rouge&quot;&gt;target_name&lt;/code&gt;。目标名称，在 cmake 中是一个很特殊的存在，特殊在哪里呢，后面我一点点展开说明。&lt;/p&gt;
+
+&lt;p&gt;上面的参数中，STATIC 表示目标为静态库，而 SHARED 表示为动态库。&lt;/p&gt;
+
+&lt;p&gt;我们来看一个例子，例子很简单，就是实现一个 output 打印接口，编译成动态库 &lt;code class=&quot;highlighter-rouge&quot;&gt;liboutput.so&lt;/code&gt;，然后通过链接这个动态库的方式调用 output 方法，打印 Hello World 到屏幕上，我们来看一下目录结构&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;├── CMakeLists.txt
+├── demo
+│   ├── CMakeLists.txt
+│   └── helloworld.cpp
+├── output.cpp
+├── output.h
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;根目录中的 &lt;code class=&quot;highlighter-rouge&quot;&gt;CMakeLists.txt&lt;/code&gt; 文件为&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;project(test)
+
+add_library(output SHARED output.cpp)
+set(LIB_OUTPUT_DIR &quot;${PROJECT_SOURCE_DIR}/dist&quot;)
+set_target_properties(output
+  PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY ${LIB_OUTPUT_DIR}
+  ARCHIVE_OUTPUT_DIRECTORY ${LIB_OUTPUT_DIR}
+  )
+
+add_subdirectory(demo)
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;为了方便，我们通过 &lt;code class=&quot;highlighter-rouge&quot;&gt;set_target_properties&lt;/code&gt; 将动态库编译后，存放到根目录下的 dist 文件夹中，&lt;code class=&quot;highlighter-rouge&quot;&gt;${PROJECT_SOURCE_DIR}&lt;/code&gt; 这个变量所代表的目录，跟 project 有关，表示的是指定了 project 的目录作为源代码路径，也就是 &lt;code class=&quot;highlighter-rouge&quot;&gt;${PROJECT_SOURCE_DIR}&lt;/code&gt; 这个变量的值。&lt;/p&gt;
+
+&lt;p&gt;而 &lt;code class=&quot;highlighter-rouge&quot;&gt;demo/CMakeLists.txt&lt;/code&gt; 为&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;cmake_minimum_required(VERSION 2.8)
+
+include_directories(${PROJECT_SOURCE_DIR})
+add_executable(helloworld helloworld.cpp)
+target_link_libraries(helloworld PUBLIC output)
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;编译成可执行文件 helloworld，编译成功后，看下链接的情况&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt; # ldd helloworld 
+	linux-vdso.so.1 (0x00007ffc93ff9000)
+	liboutput.so =&amp;gt; /home/jona/test/dist/liboutput.so (0x00007f1ba8c16000)
+	libstdc++.so.6 =&amp;gt; /usr/lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f1ba888d000)
+	libgcc_s.so.1 =&amp;gt; /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f1ba8675000)
+	libc.so.6 =&amp;gt; /lib/x86_64-linux-gnu/libc.so.6 (0x00007f1ba8284000)
+	libm.so.6 =&amp;gt; /lib/x86_64-linux-gnu/libm.so.6 (0x00007f1ba7ee6000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f1ba901b000)
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;在 dist 目录下的动态库也编译成功了，看下目录情况&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;├── CMakeLists.txt
+├── demo
+│   ├── CMakeLists.txt
+│   └── helloworld.cpp
+├── dist
+│   ├── liboutput.so
+├── output.cpp
+├── output.h
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;可执行程序 helloworld 已经成功链接到了 &lt;code class=&quot;highlighter-rouge&quot;&gt;liboutput.so&lt;/code&gt; 这个动态库上。&lt;/p&gt;
+
+&lt;p&gt;一般来说，我们编译动态库的时候，都会加上版本号，比如 &lt;code class=&quot;highlighter-rouge&quot;&gt;liboutput.so.0.0.1&lt;/code&gt; ，然后可执行文件在链接的时候，链接到 &lt;code class=&quot;highlighter-rouge&quot;&gt;liboutput.so&lt;/code&gt;，让 &lt;code class=&quot;highlighter-rouge&quot;&gt;liboutput.so&lt;/code&gt; 是 &lt;code class=&quot;highlighter-rouge&quot;&gt;liboutput.so.0.0.1&lt;/code&gt; 的软链接即可。这样，我们在升级不同版本的动态库的时候，只需要修改软链接执行不同版本的动态库即可，不需要重新编译链接源程序。&lt;/p&gt;
+
+&lt;p&gt;但是，笔者在使用 cmake 的时候，就遇到了一些坑。我通过下面这种方式来编译的动态库，根目录下的 &lt;code class=&quot;highlighter-rouge&quot;&gt;CMakeLists.txt&lt;/code&gt; 改为&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;project(test)
+
+add_library(output SHARED output.cpp)
+
+file(STRINGS &quot;VERSION&quot; LIB_VERSION)
+
+set(LIB_OUTPUT_DIR &quot;${PROJECT_SOURCE_DIR}/dist&quot;)
+
+set_target_properties(output
+  PROPERTIES
+  VERSION ${LIB_VERSION}
+  SOVERSION ${LIB_VERSION}
+  LIBRARY_OUTPUT_DIRECTORY ${LIB_OUTPUT_DIR}
+  ARCHIVE_OUTPUT_DIRECTORY ${LIB_OUTPUT_DIR}
+  )
+
+add_subdirectory(demo)
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;在 &lt;code class=&quot;highlighter-rouge&quot;&gt;set_target_properties&lt;/code&gt; 中，加上了 SOVERSION 版本号，这样，在编译的时候，就会编译成带有版本号的动态库文件，然后创建一个不带有版本号的软链接，变成完成的库如下所示&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;lrwxrwxrwx 1 jona jona   18 Apr 23 18:19 liboutput.so -&amp;gt; liboutput.so.0.0.1
+-rwxrwxr-x 1 jona jona 8648 Apr 23 18:19 liboutput.so.0.0.1
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;再看下可在执行文件的情况&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;# ldd helloworld 
+	linux-vdso.so.1 (0x00007ffdedbfc000)
+	liboutput.so.0.0.1 =&amp;gt; /home/jona/test/dist/liboutput.so.0.0.1 (0x00007f5e480d2000)
+	libstdc++.so.6 =&amp;gt; /usr/lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f5e47d49000)
+	libgcc_s.so.1 =&amp;gt; /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f5e47b31000)
+	libc.so.6 =&amp;gt; /lib/x86_64-linux-gnu/libc.so.6 (0x00007f5e47740000)
+	libm.so.6 =&amp;gt; /lib/x86_64-linux-gnu/libm.so.6 (0x00007f5e473a2000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f5e484d7000)
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;链接的是 &lt;code class=&quot;highlighter-rouge&quot;&gt;liboutput.so.0.0.1&lt;/code&gt; ，为什么不是链接的 &lt;code class=&quot;highlighter-rouge&quot;&gt;liboutput.so&lt;/code&gt; 呢，虽然我们在 &lt;code class=&quot;highlighter-rouge&quot;&gt;CMakeLists.txt&lt;/code&gt; 文件中是&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;target_link_libraries(helloworld PUBLIC output)
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;这样指定的动态库。这里的 output 是目标名，也就是上面我们通过&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;add_library(output SHARED output.cpp)
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;指定的目标名，cmake 在链接的时候，通过这个 target name 找到这个库的完整路径进行链接，而库的名称就是&lt;code class=&quot;highlighter-rouge&quot;&gt;liboutput.so.0.0.1&lt;/code&gt;，而不是 &lt;code class=&quot;highlighter-rouge&quot;&gt;liboutput.so&lt;/code&gt;。我们可以看一下 cmake 生成的链接文件 &lt;code class=&quot;highlighter-rouge&quot;&gt;link.txt&lt;/code&gt;&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;/usr/bin/c++    -rdynamic CMakeFiles/helloworld.dir/helloworld.cpp.o  -o helloworld -Wl,-rpath,/home/jona/Documents/programming/c_plus_plus/cmakefile_test/test/dist ../../dist/liboutput.so.0.0.1 
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;链接的时候，直接使用的就是带有版本号的库文件名。&lt;/p&gt;
+
+&lt;p&gt;注意，这里即使按照下面这种方式进行链接&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;/usr/bin/c++    -rdynamic CMakeFiles/helloworld.dir/helloworld.cpp.o  -o helloworld -Wl,-rpath,/home/jona/Documents/programming/c_plus_plus/cmakefile_test/test/dist ../../dist/liboutput.so
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;用 ldd 查看结果，仍然链接的是带版本好的库，因为不带版本号的库，就是一个软链接，实际的库就是带有版本号的。&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;target_link_libraries 中指定链接库的方式有如下这几种&lt;/p&gt;
+
+  &lt;ul&gt;
+    &lt;li&gt;&lt;strong&gt;A library target name&lt;/strong&gt;，就是上面我们使用到的&lt;/li&gt;
+    &lt;li&gt;&lt;strong&gt;A full path to a library file&lt;/strong&gt;，这是指定库的完整路径的方式&lt;/li&gt;
+    &lt;li&gt;&lt;strong&gt;A plain library name&lt;/strong&gt;，这种方式比较特殊，cmake 会将这种方式翻译成 &lt;code class=&quot;highlighter-rouge&quot;&gt;-lname&lt;/code&gt; 或者 &lt;code class=&quot;highlighter-rouge&quot;&gt;name.lib&lt;/code&gt; 的方式&lt;/li&gt;
+  &lt;/ul&gt;
+
+  &lt;p&gt;比如，我们将上面的改成 &lt;code class=&quot;highlighter-rouge&quot;&gt;target_link_libraries(helloworld PUBLIC output.so)&lt;/code&gt; 的方式，&lt;code class=&quot;highlighter-rouge&quot;&gt;link.txt&lt;/code&gt; 就变成了&lt;/p&gt;
+
+  &lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;/usr/bin/c++    -rdynamic CMakeFiles/helloworld.dir/helloworld.cpp.o  -o helloworld -Wl,-rpath,/home/jona/Documents/programming/c_plus_plus/cmakefile_test/test/dist -loutput
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;  &lt;/div&gt;
+
+  &lt;ul&gt;
+    &lt;li&gt;&lt;strong&gt;A link flag&lt;/strong&gt;，这种方式，在名称前面加上 &lt;code class=&quot;highlighter-rouge&quot;&gt;-&lt;/code&gt;，就变成了 linker 的选项了&lt;/li&gt;
+  &lt;/ul&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;那么，我们如何才能做到预期的那样，直接链接到不带版本号的库呢，借助一点小技巧。在编译成动态库的时候，不加版本号，在编译结束后，将库重命名成带有版本号的库，然后创建库的软链接为不带版本号的库，&lt;code class=&quot;highlighter-rouge&quot;&gt;CMakeLists.txt&lt;/code&gt; 文件改成如下的方式&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;project(test)
+
+add_library(output SHARED output.cpp)
+
+file(STRINGS &quot;VERSION&quot; LIB_VERSION)
+
+set(LIB_OUTPUT_DIR &quot;${PROJECT_SOURCE_DIR}/dist&quot;)
+
+set_target_properties(output
+  PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY ${LIB_OUTPUT_DIR}
+  ARCHIVE_OUTPUT_DIRECTORY ${LIB_OUTPUT_DIR}
+  )
+
+add_custom_command(TARGET output POST_BUILD
+  COMMAND
+  mv liboutput.so liboutput.so.${LIB_VERSION}
+  COMMAND
+  ln -s liboutput.so.${LIB_VERSION} liboutput.so
+  WORKING_DIRECTORY ${LIB_OUTPUT_DIR}
+  )
+
+add_subdirectory(demo)
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;再看下可执行文件的链接情况&lt;/p&gt;
+
+&lt;div class=&quot;highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;# ldd helloworld 
+	linux-vdso.so.1 (0x00007fff453c9000)
+	liboutput.so =&amp;gt; /home/jona/test/dist/liboutput.so (0x00007f6209f38000)
+	libstdc++.so.6 =&amp;gt; /usr/lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f6209baf000)
+	libgcc_s.so.1 =&amp;gt; /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f6209997000)
+	libc.so.6 =&amp;gt; /lib/x86_64-linux-gnu/libc.so.6 (0x00007f62095a6000)
+	libm.so.6 =&amp;gt; /lib/x86_64-linux-gnu/libm.so.6 (0x00007f6209208000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f620a33d000)
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;这样就达到我们的预期了&lt;/p&gt;
+</description>
+        <pubDate>Wed, 28 Apr 2021 07:00:00 +0800</pubDate>
+        <link>http://localhost:4000//2021/04/28/cmake-build-dynamic-lib-and-link.html</link>
+        <guid isPermaLink="true">http://localhost:4000//2021/04/28/cmake-build-dynamic-lib-and-link.html</guid>
+        
+        <category>cmake</category>
+        
+        <category>c++</category>
+        
+        <category>linux</category>
+        
+        
+      </item>
     
       <item>
         <title>antlr4 简介</title>
@@ -2228,109 +2447,6 @@ students. a am I
         <category>interview</category>
         
         <category>考题</category>
-        
-        
-      </item>
-    
-      <item>
-        <title>Git and Github</title>
-        <description>&lt;p&gt;The Difference Between Git and Github.&lt;/p&gt;
-
-&lt;h2 id=&quot;初识git-and-github&quot;&gt;初识git and github&lt;/h2&gt;
-&lt;p&gt;相信对于程序员来说，git 和 github 一定不会陌生，可能很多人每天都会与他们打交道。有次与同事聊
-天，他问我，git 和 github 有什么区别呢。最开始，我的理解是，把 git 看成是一个版本控制工具，
-而 github 作为一个源代码托管平台，我们可以通过 git 工具，从代码托管平台 clone 或者 commit
-文件。&lt;/p&gt;
-
-&lt;p&gt;对于这个理解，确实显得过于肤浅，但是要谈到这两者之间的关系，还是需要从 git 的诞生历史说起。&lt;/p&gt;
-
-&lt;h2 id=&quot;git&quot;&gt;Git&lt;/h2&gt;
-&lt;p&gt;Git 是一个分布式版本控制系统，最初是由 linux 之父 linus torvalds&lt;sup id=&quot;fnref:1&quot;&gt;&lt;a href=&quot;#fn:1&quot; class=&quot;footnote&quot;&gt;1&lt;/a&gt;&lt;/sup&gt; 于 2005 年以 GPL
-发布的。 git 可以说是 linus 在完成 linux 这一宏伟产品后又一个划时代的产品，虽然他本人曾很谦
-虚的说，如果没有 git，肯定会有 git 类 (git like) 的产品出现 &lt;sup id=&quot;fnref:2&quot;&gt;&lt;a href=&quot;#fn:2&quot; class=&quot;footnote&quot;&gt;2&lt;/a&gt;&lt;/sup&gt;&lt;sup id=&quot;fnref:3&quot;&gt;&lt;a href=&quot;#fn:3&quot; class=&quot;footnote&quot;&gt;3&lt;/a&gt;&lt;/sup&gt;。&lt;/p&gt;
-
-&lt;p&gt;2002年至2005 年， Linus 顶着开源社区精英们口诛笔伐的压力，选择了一个商业版本控制系统
- BitKeeper 作为 Linux 内核的代码管理工具。BitKeeper 不同于 CVS 和 SVN 等集中式版本控制
- 工具，而是一款分布式版本控制工具，它满足了 Linux 内核开发的技术需求。&lt;/p&gt;
-
-&lt;p&gt;分布式版本控制系统最大的反传统之处在于，可以不需要集中式的版本库，每个人都工作在通过克隆建立的
-本地版本库中。也就是说每个人都拥有一个完整的版本库，查看提交日志、提交、创建里程碑和分支、合并
-分支、回退等所有操作都直接在本地完成而不需要网络连接。每个人都是本地版本库的主人，不再有谁能提交
-谁不能提交的限制，加上多样的协同工作模型（版本库间推送、拉回，以及补丁文件传送等）让开源项目的
-参与度有爆发式增长。&lt;/p&gt;
-
-&lt;p&gt;但是 BitKeeper 毕竟是一款商业软件，这与开源精神不符，开源社区中很多人对此举提出了质疑，而且
- BitMover 公司也只是暂时将 BitKeeper 免费提供给 linux 内核团队使用。这中间发生了一个小插
- 曲，在2005年4月，Andrew Tridgell（即大名鼎鼎的 Samba 的作者）试图对 BitKeeper 进行反向
- 工程，以开发一个能与 BitKeeper 交互的开源工具。这激怒了 BitKeeper 软件的所有者 BitMover
- 公司，要求收回对 Linux 社区免费使用 BitKeeper 的授权 &lt;sup id=&quot;fnref:4&quot;&gt;&lt;a href=&quot;#fn:4&quot; class=&quot;footnote&quot;&gt;4&lt;/a&gt;&lt;/sup&gt;。&lt;/p&gt;
-
-&lt;p&gt;但是当时现有的一些版本控制工具比如 CVS，或多或少都存在一些问题，特别是性能问题， linus 是极力
-反对使用这些软件的，他甚至宁愿使用 diff 和 patch。在 linux 内核团队与 BitMover 公司交涉无
-果的情况下，linus 决定开发一个版本控制工具，两周之后，git 诞生了。&lt;/p&gt;
-
-&lt;p&gt;与 SVN 和 CVS 等软件不同的是，Git 更关注文件的整体性是否有改变，Git 更像一个文件系统，它允
-许开发者在本地获取各种数据，而不是随时都需要连接服务器。Git 的最大的特点就是离线分布式代码管
-理，速度飞快，适合管理大型项目，难以置信的非线性分支管理。&lt;/p&gt;
-
-&lt;p&gt;git 从发布起就获得了迅速的推广，2005 年 4 月 3 日开始开发，4 月 6 日项目发布，而在 6 月 16
- 日 Linux 内核 2.6.12 发布时， Git 已经在维护 Linux 核心的源代码了。&lt;/p&gt;
-
-&lt;p&gt;2005年7月26日，Linus功成身退，将 Git 的维护交给另外一个 Git 的主要贡献者 Junio C Hamano，
-直到现在 &lt;sup id=&quot;fnref:5&quot;&gt;&lt;a href=&quot;#fn:5&quot; class=&quot;footnote&quot;&gt;5&lt;/a&gt;&lt;/sup&gt;。 git 虽然是在 linux 平台下开发的，但是显然，它已经可以跨平台运行在多个主流的
-操作系统上。&lt;/p&gt;
-
-&lt;h2 id=&quot;github&quot;&gt;Github&lt;/h2&gt;
-&lt;p&gt;GitHub平台于2007年10月1日开始开发。网站于2008年2月以beta版本开始上线，4月份正式上线。它是
-一个通过Git进行版本控制的软件源代码托管服务，由GitHub公司（曾称 Logical Awesome）的开发者
- Chris Wanstrath、PJ Hyet t和 Tom Preston-Werner 使用 Ruby on Rails 编写而成。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;不同于开源的 Git，Github 提供了一套商业的解决方案。&lt;/strong&gt; GitHub 同时提供付费账户和免费账户。
-这两种账户都可以创建公开的代码仓库，但是付费账户还可以创建私有的代码仓库。根据在 2009 年的 Git
-用户调查，GitHub 是最流行的 Git 访问站点。除了允许个人和组织创建和访问保管中的代码以外，
-它也提供了一些方便社会化共同软件开发的功能，即一般人口中的社区功能，包括允许用户追踪其他用户、
-组织、软件库的动态，对软件代码的改动和bug提出评论等。GitHub 也提供了图表功能，用于概观显示
-开发者们怎样在代码库上工作以及软件的开发活跃程度。&lt;sup id=&quot;fnref:6&quot;&gt;&lt;a href=&quot;#fn:6&quot; class=&quot;footnote&quot;&gt;6&lt;/a&gt;&lt;/sup&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;回到我们最开始的那个问题，Git 是由 linus 开发的一款用于代码版本控制的分布式版本控制工具，
-是基于 GPL 开源的；而 Github 是基于 git 的一种网站式的代码托管服务，提供了一种商业解决方案，
-提供免费用户和付费用户两种模式。可以通过 git 访问 github 站点，在 github 上托管自己的源代
-码。当然，github 还有很多其他的功能，可以到 github 上去看看。&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;参考文献：&lt;/strong&gt;&lt;/p&gt;
-
-&lt;div class=&quot;footnotes&quot;&gt;
-  &lt;ol&gt;
-    &lt;li id=&quot;fn:1&quot;&gt;
-      &lt;p&gt;&lt;a href=&quot;http://mp.weixin.qq.com/s?__biz=MjM5ODQ2MDIyMA==&amp;amp;mid=403228545&amp;amp;idx=1&amp;amp;sn=f2d76137297fd33ed6e80126a0b67aa2&amp;amp;scene=21#wechat_redirect&quot;&gt;linus 一生只为寻找欢笑&lt;/a&gt; &lt;a href=&quot;#fnref:1&quot; class=&quot;reversefootnote&quot;&gt;&amp;#8617;&lt;/a&gt;&lt;/p&gt;
-    &lt;/li&gt;
-    &lt;li id=&quot;fn:2&quot;&gt;
-      &lt;p&gt;&lt;a href=&quot;https://www.linuxfoundation.org/blog/10-years-of-git-an-interview-with-git-creator-linus-torvalds/&quot;&gt;10 Years of Git: An Interview with Git Creator Linus Torvalds&lt;/a&gt; &lt;br /&gt; &lt;a href=&quot;#fnref:2&quot; class=&quot;reversefootnote&quot;&gt;&amp;#8617;&lt;/a&gt;&lt;/p&gt;
-    &lt;/li&gt;
-    &lt;li id=&quot;fn:3&quot;&gt;
-      &lt;p&gt;&lt;a href=&quot;http://blog.jobbole.com/85772/&quot;&gt;Git 10 周年访谈：Linus 讲述背后故事&lt;/a&gt; &lt;a href=&quot;#fnref:3&quot; class=&quot;reversefootnote&quot;&gt;&amp;#8617;&lt;/a&gt;&lt;/p&gt;
-    &lt;/li&gt;
-    &lt;li id=&quot;fn:4&quot;&gt;
-      &lt;p&gt;Git权威指南，第一章，1.4小节：Git—Linus 的第二个伟大作品 &lt;a href=&quot;#fnref:4&quot; class=&quot;reversefootnote&quot;&gt;&amp;#8617;&lt;/a&gt;&lt;/p&gt;
-    &lt;/li&gt;
-    &lt;li id=&quot;fn:5&quot;&gt;
-      &lt;p&gt;&lt;a href=&quot;https://en.wikipedia.org/wiki/Git&quot;&gt;Git desc on wikipedia&lt;/a&gt; &lt;a href=&quot;#fnref:5&quot; class=&quot;reversefootnote&quot;&gt;&amp;#8617;&lt;/a&gt;&lt;/p&gt;
-    &lt;/li&gt;
-    &lt;li id=&quot;fn:6&quot;&gt;
-      &lt;p&gt;&lt;a href=&quot;https://wc.yooooo.us/wiki/GitHub&quot;&gt;GitHub desc on wikipedia&lt;/a&gt; &lt;a href=&quot;#fnref:6&quot; class=&quot;reversefootnote&quot;&gt;&amp;#8617;&lt;/a&gt;&lt;/p&gt;
-    &lt;/li&gt;
-  &lt;/ol&gt;
-&lt;/div&gt;
-</description>
-        <pubDate>Sun, 10 Sep 2017 07:31:00 +0800</pubDate>
-        <link>http://localhost:4000//2017/09/10/git-and-github.html</link>
-        <guid isPermaLink="true">http://localhost:4000//2017/09/10/git-and-github.html</guid>
-        
-        <category>版本控制</category>
-        
-        <category>git</category>
-        
-        <category>github</category>
         
         
       </item>
