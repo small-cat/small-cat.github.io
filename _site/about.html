@@ -65,6 +65,7 @@
 2014.06 ~ 2015.06　　　北京锐安科技有限公司</p>
 
 <h2 id="能力专长">能力专长</h2>
+
 <ol>
   <li>熟练使用 linux 系统，掌握 c/c++，shell。 <br /></li>
   <li>熟练使用vim 、 gcc/gdb ，能够使用vimscript编写自定义配置，熟悉makefile 。 <br /></li>
@@ -72,9 +73,28 @@
   <li>熟悉 mysql 数据库，熟悉mysql主备和集群搭建，以及常用sql调优方法 。</li>
   <li>熟悉redis集群搭建和redis操作，熟悉redis源代码和事件驱动模型。</li>
   <li>了解 linux 内核源码，了解内核裁剪、编译和调试，了解运行库的原理。</li>
+  <li>熟悉编译器框架，熟悉antlr4语法解析工具，构建抽象语法树。</li>
 </ol>
 
 <h2 id="项目经验">项目经验</h2>
+
+<p><strong>2020.06~至今　　　基础平台引擎开发部语法组经理</strong><br /><strong>描述：</strong> 负责整个公司语法分析和语义分析的开发和维护工作。<br /><strong>主要工作：</strong></p>
+
+<ol>
+  <li>将语法分析和语义分析工作从动态脱敏项目和审计项目中解耦，实现业务与antlr4解析器的解耦。</li>
+  <li>设计和实现语法分析统一框架，针对13种不同的关系型数据库的sql，构建统一的抽象语法树输出接口，通过访问器模式进行统一遍历。</li>
+  <li>优化上下文无关文法，优化 antlr4 语法解析器。通过 ParseTreeWalker 的方式控制 DSF 的遍历深度；通过 SLL 优先的解析算法提升解析器的解析速度；通过 dfs cache 持久化的方式热启动，提升解析的速度。</li>
+  <li>调研 mongodb 协议解析输出结果，设计和实现 mongodb api 调用与 mongodb shell command 之间转换的翻译器</li>
+</ol>
+
+<p><strong>2019.08~2020.05　　　动态脱敏系统</strong><br /><strong>描述：</strong> 负责sql语法分析和语义分析开发工作。<br /><strong>主要工作：</strong></p>
+
+<ol>
+  <li>将 oracle 语法分析由 bison 迁移到 antlr4。</li>
+  <li>编写国产数据库 gaussdb，kingbase，dm 等多个数据库的 sql 语法规则，使用 antlr4 语法分析器进行分析。</li>
+  <li>编写动态脱敏语义分析算法，根据自定义规则，定位 sql 中的敏感列并对 sql 进行重写。通过对查询语句构建统一的 DAG 结构，利用上下文 context，对 DAG 结构进行语义分析。</li>
+  <li>重构动态脱敏语法模块，构建动态脱敏语法模块统一框架。</li>
+</ol>
 
 <p><strong>2015.08~2019.05　　　中国移动转售业务运营支撑系统</strong><br /><strong>描述：</strong> 负责全国31省转售业务运营与支撑。<br /><strong>主要工作：</strong></p>
 
@@ -116,6 +136,71 @@
   <li>从tcpdump格式的16进制数据包中，分析应用层数据特征和目标数据获取的可行性；</li>
   <li>修复协议升级造成的系统解析异常，并添加支持对淘宝类、论坛类等网站的数据解析功能，添加支持30多个网站或app的解析。</li>
   <li>驻扎现场参与系统部署工作，解决现场异常问题，完成最终版本的升级和上线，收集系统异常信息。</li>
+</ol>
+
+<h2 id="个人作品">个人作品</h2>
+
+<ol>
+  <li>
+    <p>关系型数据库 mysql，oracle，postgre，kingbase 等 sql 上下文无关文法的实现及其语义分析，<a href="https://github.com/small-cat/myCode_repository/tree/master/antlr4_cpp">项目地址</a></p>
+  </li>
+  <li>
+    <p>mongodb api调用到mongodb shell cmd翻译器实现，<a href="https://github.com/small-cat/mongo_command_transfer">项目地址</a></p>
+
+    <div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>$ ./bin/mongodbcmd_transfer -f insert.txt 
+original -----&gt;&gt;&gt;&gt;&gt;
+db.runCommand(   {      insert: "users",      documents: [         { _id: 2, user: "ijk123", status: "A" },         { _id: 3, user: "xyz123", status: "P" },         { _id: 4, user: "mop123", status: "P" }      ],      ordered: false,      writeConcern: { w: "majority", wtimeout: 5000 }   })
+   
+translating -----&gt;&gt;&gt;&gt;&gt;
+db.users.insert({[{_id:2, user:"ijk123", status:"A"}, {_id:3, user:"xyz123", status:"P"}, {_id:4, user:"mop123", status:"P"}], false, {w:"majority", wtimeout:5000}})
+</code></pre></div>    </div>
+  </li>
+  <li>
+    <p>cbc 编译器前端实现，实现语法分析，抽象语法树的构建，变量消解，类型消解到静态类型转换，<a href="https://github.com/small-cat/cbc-cpp">项目地址</a></p>
+
+    <div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>源码部分：
+import stdio;
+   
+int
+main(int argc, char **argv)
+{
+    printf("Hello, World!\n");
+    return 0;
+}
+   
+编译输出抽象语法树：
+$ ./sesame -I test/import/ test/hello.cb --dump-ast
+(declaration_file (declaration_stmt (def_const const (type (typeref (typeref_base void) (typeref_precise *))) (name NULL) = (expr (expr10 (expr9 (expr8 (expr7 (expr6 (expr5 (expr4 (expr3 (expr2 (expr1 (term (unary (postfix (primary 0))))))))))))))) ;)) (declaration_stmt (s_typedef typedef (typeref (typeref_base unsigned long)) size_t ;)) (declaration_stmt (s_typedef typedef (typeref (typeref_base long)) ptrdiff_t ;)))
+variables:
+functions:
+  FunctionName: main
+  IsPrivate: false
+  Parameters: 
+    Params:
+      Name: argc
+      TypeNode: int
+      Name: argv
+      TypeNode: char**
+  FunctionBody: 
+    &lt;&lt;BlockNode&gt;&gt; (test/hello.cb, line 5, column 0)
+    variables:
+    statements:
+      &lt;&lt;ExprStmtNode&gt;&gt; (test/hello.cb, line 6, column 4)
+      expr: 
+        &lt;&lt;FunctioncallNode&gt;&gt; (test/hello.cb, line 6, column 4)
+        Expr: 
+          &lt;&lt;VariableNode&gt;&gt; (test/hello.cb, line 6, column 4)
+          name: printf
+        Arguments:
+          &lt;&lt;StringLiteralNode&gt;&gt; (test/hello.cb, line 6, column 11)
+          Value: "Hello, World!\n"
+      &lt;&lt;ReturnStmtNode&gt;&gt; (test/hello.cb, line 7, column 4)
+      Expr: 
+        &lt;&lt;IntegerLiteralNode&gt;&gt; (test/hello.cb, line 7, column 11)
+        TypeNode: int
+        Value: 0
+</code></pre></div>    </div>
+  </li>
 </ol>
 
 <h2 id="个人评价">个人评价</h2>

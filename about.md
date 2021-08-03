@@ -30,7 +30,8 @@ title: 个人简历
 2015.08 ~ 2019.05　　　中国移动信息技术有限公司<br>
 2014.06 ~ 2015.06　　　北京锐安科技有限公司
 
-## 能力专长                                                                                                                                                               
+## 能力专长 
+
 1. 熟练使用 linux 系统，掌握 c/c++，shell。 <br>
 2. 熟练使用vim 、 gcc/gdb ，能够使用vimscript编写自定义配置，熟悉makefile 。 <br>
 3. 了解python, 熟悉 scrapy 框架爬取网页结构化数据。 <br>
@@ -92,6 +93,69 @@ title: 个人简历
 1. 从tcpdump格式的16进制数据包中，分析应用层数据特征和目标数据获取的可行性； 
 2. 修复协议升级造成的系统解析异常，并添加支持对淘宝类、论坛类等网站的数据解析功能，添加支持30多个网站或app的解析。
 3. 驻扎现场参与系统部署工作，解决现场异常问题，完成最终版本的升级和上线，收集系统异常信息。
+
+## 个人作品
+
+1. 关系型数据库 mysql，oracle，postgre，kingbase 等 sql 上下文无关文法的实现及其语义分析，[项目地址](https://github.com/small-cat/myCode_repository/tree/master/antlr4_cpp)
+
+2. mongodb api调用到mongodb shell cmd翻译器实现，[项目地址](https://github.com/small-cat/mongo_command_transfer)
+
+   ```
+   $ ./bin/mongodbcmd_transfer -f insert.txt 
+   original ----->>>>>
+   db.runCommand(   {      insert: "users",      documents: [         { _id: 2, user: "ijk123", status: "A" },         { _id: 3, user: "xyz123", status: "P" },         { _id: 4, user: "mop123", status: "P" }      ],      ordered: false,      writeConcern: { w: "majority", wtimeout: 5000 }   })
+   
+   translating ----->>>>>
+   db.users.insert({[{_id:2, user:"ijk123", status:"A"}, {_id:3, user:"xyz123", status:"P"}, {_id:4, user:"mop123", status:"P"}], false, {w:"majority", wtimeout:5000}})
+   ```
+
+3. cbc 编译器前端实现，实现语法分析，抽象语法树的构建，变量消解，类型消解到静态类型转换，[项目地址](https://github.com/small-cat/cbc-cpp)
+
+   ```
+   源码部分：
+   import stdio;
+   
+   int
+   main(int argc, char **argv)
+   {
+       printf("Hello, World!\n");
+       return 0;
+   }
+   
+   编译输出抽象语法树：
+   $ ./sesame -I test/import/ test/hello.cb --dump-ast
+   (declaration_file (declaration_stmt (def_const const (type (typeref (typeref_base void) (typeref_precise *))) (name NULL) = (expr (expr10 (expr9 (expr8 (expr7 (expr6 (expr5 (expr4 (expr3 (expr2 (expr1 (term (unary (postfix (primary 0))))))))))))))) ;)) (declaration_stmt (s_typedef typedef (typeref (typeref_base unsigned long)) size_t ;)) (declaration_stmt (s_typedef typedef (typeref (typeref_base long)) ptrdiff_t ;)))
+   variables:
+   functions:
+     FunctionName: main
+     IsPrivate: false
+     Parameters: 
+       Params:
+         Name: argc
+         TypeNode: int
+         Name: argv
+         TypeNode: char**
+     FunctionBody: 
+       <<BlockNode>> (test/hello.cb, line 5, column 0)
+       variables:
+       statements:
+         <<ExprStmtNode>> (test/hello.cb, line 6, column 4)
+         expr: 
+           <<FunctioncallNode>> (test/hello.cb, line 6, column 4)
+           Expr: 
+             <<VariableNode>> (test/hello.cb, line 6, column 4)
+             name: printf
+           Arguments:
+             <<StringLiteralNode>> (test/hello.cb, line 6, column 11)
+             Value: "Hello, World!\n"
+         <<ReturnStmtNode>> (test/hello.cb, line 7, column 4)
+         Expr: 
+           <<IntegerLiteralNode>> (test/hello.cb, line 7, column 11)
+           TypeNode: int
+           Value: 0
+   ```
+
+   
 
 ## 个人评价
 　　本人热爱编程，尤为钟情于linux平台，对开源技术充满热情，学习和阅读redis源代码，研究gcc编译过程，阅读linux内核源代码，对系统编程和嵌入式开发很感兴趣。开设博客(blog.csdn.net/honglicu123, blog.wuzhenyu.com.cn)，与大家分享自己的学习心得和实践经验，希望能够与更多志同道合之人一起探讨，共同进步。
