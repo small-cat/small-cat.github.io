@@ -124,7 +124,6 @@ title: 个人简历
    
    编译输出抽象语法树：
    $ ./sesame -I test/import/ test/hello.cb --dump-ast
-   (declaration_file (declaration_stmt (def_const const (type (typeref (typeref_base void) (typeref_precise *))) (name NULL) = (expr (expr10 (expr9 (expr8 (expr7 (expr6 (expr5 (expr4 (expr3 (expr2 (expr1 (term (unary (postfix (primary 0))))))))))))))) ;)) (declaration_stmt (s_typedef typedef (typeref (typeref_base unsigned long)) size_t ;)) (declaration_stmt (s_typedef typedef (typeref (typeref_base long)) ptrdiff_t ;)))
    variables:
    functions:
      FunctionName: main
