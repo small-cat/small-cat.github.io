@@ -34,11 +34,11 @@ title: 个人简历
 
 1. 熟练使用 linux 系统，掌握 c/c++，shell。 <br>
 2. 熟练使用vim 、 gcc/gdb ，能够使用vimscript编写自定义配置，熟悉makefile 。 <br>
-3. 了解python, 熟悉 scrapy 框架爬取网页结构化数据。 <br>
 4. 熟悉 mysql 数据库，熟悉mysql主备和集群搭建，以及常用sql调优方法 。
 5. 熟悉redis集群搭建和redis操作，熟悉redis源代码和事件驱动模型。
 6. 了解 linux 内核源码，了解内核裁剪、编译和调试，了解运行库的原理。
-7. 熟悉编译器框架，熟悉antlr4语法解析工具，构建抽象语法树。
+7. 熟悉编译器框架，熟悉antlr4语法解析工具构建抽象语法树。
+7. 熟悉定制化 centos7.9 系统，使用 kickstart 自动化安装系统。
 
 ## 项目经验
 
