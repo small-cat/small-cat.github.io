@@ -72,8 +72,8 @@
   <li>熟悉 mysql 数据库，熟悉mysql主备和集群搭建，以及常用sql调优方法 。</li>
   <li>熟悉redis集群搭建和redis操作，熟悉redis源代码和事件驱动模型。</li>
   <li>了解 linux 内核源码，了解内核裁剪、编译和调试，了解运行库的原理。</li>
-  <li>熟悉编译器框架，熟悉antlr4语法解析工具构建抽象语法树。</li>
-  <li>熟悉定制化 centos7.9 系统，使用 kickstart 自动化安装系统。</li>
+  <li>熟悉递归下降分析算法，熟练掌握上下文无关文法和 flex/bison 以及 antlr4语法解析工具。</li>
+  <li>掌握 kickstart 定制化 centos 操作系统镜像。</li>
 </ol>
 
 <h2 id="项目经验">项目经验</h2>
@@ -84,7 +84,8 @@
   <li>将语法分析和语义分析工作从动态脱敏项目和审计项目中解耦，实现业务与antlr4解析器的解耦。</li>
   <li>设计和实现语法分析统一框架，针对13种不同的关系型数据库的sql，构建统一的抽象语法树输出接口，通过访问器模式进行统一遍历。</li>
   <li>优化上下文无关文法，优化 antlr4 语法解析器。通过 ParseTreeWalker 的方式控制 DSF 的遍历深度；通过 SLL 优先的解析算法提升解析器的解析速度；通过 dfs cache 持久化的方式热启动，提升解析的速度。</li>
-  <li>调研 mongodb 协议解析输出结果，设计和实现 mongodb api 调用与 mongodb shell command 之间转换的翻译器</li>
+  <li>调研 mongodb 协议解析输出结果，设计和实现 mongodb api 调用与 mongodb shell command 之间转换的翻译器.</li>
+  <li>负责整个公司统一操作系统镜像的裁剪和升级工作，使用smbash替换bourne shell，完成对登录账户访问权限和访问命令的控制。通过 kickstart 的方式自定义操作系统镜像，并新增镜像升级的方式，重装系统后完成产品和镜像的升级并保持原有的数据不变。</li>
 </ol>
 
 <p><strong>2019.08~2020.05　　　动态脱敏系统</strong><br /><strong>描述：</strong> 负责sql语法分析和语义分析开发工作。<br /><strong>主要工作：</strong></p>
@@ -94,6 +95,7 @@
   <li>编写国产数据库 gaussdb，kingbase，dm 等多个数据库的 sql 语法规则，使用 antlr4 语法分析器进行分析。</li>
   <li>编写动态脱敏语义分析算法，根据自定义规则，定位 sql 中的敏感列并对 sql 进行重写。通过对查询语句构建统一的 DAG 结构，利用上下文 context，对 DAG 结构进行语义分析。</li>
   <li>重构动态脱敏语法模块，构建动态脱敏语法模块统一框架。</li>
+  <li>优化脱敏select *展开算法，优化数据库脱敏算法，以预加载的方式，通过分段函数的形式将脱敏算法转换成表达式，使得改写后的脱敏语句性能提升了 50%。</li>
 </ol>
 
 <p><strong>2015.08~2019.05　　　中国移动转售业务运营支撑系统</strong><br /><strong>描述：</strong> 负责全国31省转售业务运营与支撑。<br /><strong>主要工作：</strong></p>
