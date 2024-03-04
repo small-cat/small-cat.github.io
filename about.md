@@ -46,7 +46,7 @@ title: 个人简历
 
 1. 基于 llvm clang-tidy 静态分析框架，实现 autosar cpp rules 规则的静态检查功能，完成包含 undefined behavior 在内的 20 多个重要规则检查功能的实现。
 2. 完成 alios 中中间件 ros2 的工具链切换，从 gcc 切换到 clang 的交叉编译。完成 FimaEngine 工具链切换到 gcc 的交叉编译。
-3. 基于 phasar 静态分析框架，实现 type state analysis 的 spin lock 检查的 demo 实现；完善 wllvm 实现对 kernel 交叉编译并输出完整的 llvm byte；修复 phasar 实现的 ide 框架中 type state analysis 分析的bug，过程间分析时 call-to-start 边函数传递的信息丢失导致分析结果不准确；修复 phasar 扫描 kernel llvm ir 时因为 type hierarchy graph 太大导致的 OOM；发现 llvm CflAnderson pta 算法的bug，在扫描kernel时无法退出，导致内存OOM。
+3. 基于 phasar 静态分析框架，实现 type state analysis 的 spin lock 检查的 demo 实现；完善 wllvm 实现对 kernel 交叉编译并输出完整的 llvm bytecode；修复 phasar 实现的 ide 框架中 type state analysis 分析的bug，过程间分析时 call-to-start 边函数传递的信息丢失导致分析结果不准确；修复 phasar 扫描 kernel llvm ir 时因为 type hierarchy graph 太大导致的 OOM；发现 llvm CflAnderson pta 算法的bug，在扫描kernel时无法退出，导致内存OOM。
 4. 研究 tvm，新增 tvm byoc 对接 bmlib 的后端实现 demo；实现 tvm byoc 对接 acl 算子，并打通 byoc + ansor 对 ar 导航模型的分析和优化。
 5. 基于 yocto，设计和实现针对斑马座舱和智驾系统的二级构建系统，统一 rootfs；设计和实现 yocto layer 的多工具链支持以及外部 rootfs 编译的 yocto layer 的支持，并输出一篇专利。
 
